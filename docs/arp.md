@@ -56,16 +56,19 @@ O `arp.py` está dividido nas seguintes seções:
 1. **Tipos e constantes** — aliases como `EnderecoIp`, `EnderecoMac` e
    `ResultadoArp`, além dos valores padrão de tempo limite, tentativas e
    intervalo.
-2. **API pública** — `obter_rede_local`, `varrer_rede_arp`, `filtrar_bloqueados_icmp`,
+2. **API pública** — `varrer_rede_arp`, `filtrar_bloqueados_icmp`,
    `encontrar_conflitos` e `encontrar_macs_duplicados`.
-3. **Descoberta de interface e rede** — `_resolver_interface`,
-   `_obter_rede_do_sistema` e `_candidatos_de_nome_da_interface`.
+3. **Descoberta de interface e rede** — movida para
+   [`src/network/interfaces.py`](../src/network/interfaces.py):
+   `DadosRede`, `obter_dados_rede`, `_resolver_interface`,
+   `_obter_dados_do_sistema` e `_candidatos_de_nome_da_interface`.
 4. **Resolução dos alvos** — `_resolver_ips_alvo`, `_normalizar_ips_alvo`,
    `_ips_utilizaveis_da_rede` e `_validar_parametros_da_varredura`.
 5. **Construção e envio dos pacotes ARP** — `_montar_requisicoes_arp` e
    `_enviar_requisicoes_arp`.
 6. **Análise das respostas** — `_agrupar_respostas_por_ip`,
-   `_converter_para_resultado_ordenado` e `_normalizar_macs`.
+   `_converter_para_resultado_ordenado`, `_normalizar_macs` e
+   `_normalizar_ip_ativo`.
 7. **Teste manual** — bloco `if __name__ == "__main__"`.
 
 Essa divisão mantém a API pública no topo e os detalhes de implementação
@@ -113,10 +116,21 @@ o código usa esses dois campos, e não `pdst`.
 
 ## 3. Referência das funções
 
-### 3.1 `obter_rede_local(interface=None) -> tuple[str, str]`
+### 3.1 `DadosRede` e `obter_dados_rede(interface=None)`
 
-**Objetivo:** descobrir a interface e a rede IPv4 local quando o usuário não
-passa esses dados explicitamente.
+**Local:** [`src/network/interfaces.py`](../src/network/interfaces.py).
+
+**Objetivo:** descobrir interface, IP local, rede e máscara em uma única
+chamada.
+
+```python
+@dataclass(frozen=True)
+class DadosRede:
+    interface: str
+    ip_local: str
+    rede: str
+    mascara: str | None = None
+```
 
 **Parâmetros:**
 
@@ -124,19 +138,27 @@ passa esses dados explicitamente.
 | ----------- | ------------- | --------------------------------------------------------------------------------------------- |
 | `interface` | `str \| None` | Nome da interface (`"Ethernet"`, `"Wi-Fi"` etc.). Se omitido, usa a interface da rota padrão. |
 
-**Retorno:** `(interface, rede)`, por exemplo `("Ethernet", "192.168.0.0/24")`.
+**Retorno:** `DadosRede`, por exemplo:
+
+```python
+DadosRede(
+    interface="Ethernet",
+    ip_local="192.168.0.73",
+    rede="192.168.0.0/24",
+    mascara="255.255.255.0",
+)
+```
 
 **Como funciona:**
 
 1. Resolve a interface; se `interface` for `None`, usa
    `conf.route.route("0.0.0.0")[0]`.
-2. Chama `_obter_rede_do_sistema`, que tenta obter o nome amigável da
-   interface com `resolve_iface(interface).name`, porque o `psutil` e o Scapy
-   podem usar nomes diferentes no Windows.
-3. Essa função percorre `psutil.net_if_addrs()` e procura um endereço IPv4 com
-   máscara.
-4. Monta a rede com `IPv4Network(f"{ip}/{mascara}", strict=False)`.
-5. Se o `psutil` não estiver disponível ou não achar a máscara, usa
+3. Ela tenta obter o nome amigável da interface com
+   `resolve_iface(interface).name`, porque o `psutil` e o Scapy podem usar
+   nomes diferentes no Windows.
+4. Percorre `psutil.net_if_addrs()` e procura um endereço IPv4 com máscara.
+5. Monta a rede com `IPv4Network(f"{ip}/{mascara}", strict=False)`.
+6. Se o `psutil` não estiver disponível ou não achar a máscara, usa
    `get_if_addr(interface)` e assume `/24` como último recurso.
 
 **Por que não usar `conf.iface`:**
@@ -329,6 +351,10 @@ automático.
 
 ### 3.6 Descoberta de interface e rede
 
+Esses helpers agora ficam em
+[`src/network/interfaces.py`](../src/network/interfaces.py). O `arp.py` importa
+`_resolver_interface` e `obter_dados_rede`.
+
 #### `_resolver_interface(interface) -> str`
 
 **Objetivo:** garantir uma interface concreta.
@@ -343,19 +369,19 @@ return conf.route.route("0.0.0.0")[0]
 
 Se o usuário passou uma interface, usa ela. Caso contrário, usa a interface da
 rota padrão. Não usa `conf.iface` para evitar o problema da VPN descrito em
-`obter_rede_local`.
+`obter_dados_rede`.
 
-#### `_obter_rede_do_sistema(interface) -> str | None`
+#### `_obter_dados_do_sistema(interface) -> DadosRede | None`
 
-**Objetivo:** tentar obter a rede IPv4 da interface via `psutil`.
+**Objetivo:** tentar obter IP, máscara e rede da interface via `psutil`.
 
 **Como funciona:**
 
 1. Se o `psutil` não estiver disponível, retorna `None`.
 2. Percorre os nomes candidatos da interface.
 3. Para cada endereço IPv4 com máscara, monta `IPv4Network(ip/máscara)` e
-   retorna o CIDR.
-4. Se não achar nada, retorna `None` para o `obter_rede_local` usar a
+   retorna um `DadosRede` com interface, IP, máscara e CIDR.
+4. Se não achar nada, retorna `None` para o `obter_dados_rede` usar a
    alternativa `/24`.
 
 #### `_candidatos_de_nome_da_interface(interface) -> list[str]`
@@ -380,7 +406,7 @@ interface.
 
 1. Se `alvos` foi fornecido, normaliza os IPs com `_normalizar_ips_alvo`.
 2. Se `alvos` não foi fornecido:
-   - se `rede` também não foi, chama `obter_rede_local`;
+   - se `rede` também não foi, chama `obter_dados_rede`;
    - caso contrário, resolve a interface.
 3. Chama `_ips_utilizaveis_da_rede(rede)` para gerar os IPs utilizáveis.
 
@@ -643,9 +669,9 @@ O bloco `__main__` não é coberto pelo `pytest`; ele serve para teste manual.
    (por exemplo, `0.01`).
 5. **`encontrar_macs_duplicados` não é automaticamente conflito.** Proxy ARP e
    roteadores podem repetir MAC em IPs diferentes.
-6. **`obter_rede_local` é uma alternativa de conveniência.** No projeto
-   final, o ideal é usar o `src/network/interfaces.py` do grupo e passar
-   `interface`/`rede` explicitamente.
+6. **`obter_dados_rede` vive em `src/network/interfaces.py`.** Use
+   `interface`/`rede` explicitamente quando a máquina tiver mais de um
+   adaptador.
 7. **Não altere o `device.py` sozinho.** O retorno é um dicionário; a camada
    de integração/UI decide como transformar em `Device` e como mostrar o
    status “ICMP bloqueado” ou “conflito”.

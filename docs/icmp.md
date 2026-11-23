@@ -17,12 +17,13 @@ orquestração.
 O fluxo do `varrer_rede_icmp` é:
 
 1. Validar os parâmetros.
-2. Resolver a rede (`rede`, `cidr` ou IP local).
-3. Verificar o limite de tamanho da rede.
-4. Gerar a lista de IPs utilizáveis.
-5. Executar o `multiping` do `icmplib`.
-6. Filtrar apenas os hosts com `is_alive == True`.
-7. Retornar um `Set[Host]`.
+2. Resolver a interface e a rede (`rede`, `cidr` ou interface).
+3. Obter o IP de origem da interface.
+4. Verificar o limite de tamanho da rede.
+5. Gerar a lista de IPs utilizáveis.
+6. Executar o `multiping` do `icmplib`.
+7. Filtrar apenas os hosts com `is_alive == True`.
+8. Retornar um `Set[Host]`.
 
 ### Por que ICMP não basta
 
@@ -73,6 +74,8 @@ ips = {host.address for host in hosts}
 
 ### 2.1 `_validar_ip_local(ip_local) -> str`
 
+**Local:** [`src/network/interfaces.py`](../src/network/interfaces.py).
+
 **Objetivo:** validar o IP local antes de usá-lo para montar a rede.
 
 **Rejeita:**
@@ -88,27 +91,36 @@ ips = {host.address for host in hosts}
 
 ---
 
-### 2.2 `obter_ip_local() -> str`
+### 2.2 `DadosRede` e `obter_dados_rede(interface=None)`
 
-**Objetivo:** descobrir o IPv4 local da máquina.
+**Local:** [`src/network/interfaces.py`](../src/network/interfaces.py).
+
+**Objetivo:** descobrir, em uma única chamada, a interface, o IP local, a rede
+e a máscara.
+
+```python
+@dataclass(frozen=True)
+class DadosRede:
+    interface: str
+    ip_local: str
+    rede: str
+    mascara: str | None = None
+```
 
 **Como funciona:**
 
-1. Abre um socket UDP para `8.8.8.8:80`.
-2. Usa `getsockname()[0]` para obter o IP da interface usada pela rota padrão.
-3. Valida o IP com `_validar_ip_local`.
-4. Se falhar, tenta `socket.gethostbyname(socket.gethostname())`.
-5. Se o fallback também falhar, levanta `RuntimeError`.
+1. Resolve a interface; se `interface` for `None`, usa a rota padrão.
+2. Consulta o `psutil` para obter IP e máscara.
+3. Monta a rede com `IPv4Network(ip/máscara, strict=False)`.
+4. Se o `psutil` não estiver disponível, usa o IP da interface e assume `/24`.
+5. Valida o IP com `_validar_ip_local`.
 
-**Retorno:** IPv4 local como string.
+**Retorno:** `DadosRede`.
 
 **Exceção:** `RuntimeError` se não houver IP local válido.
 
-**Observação:** o socket UDP não envia pacotes; ele só consulta a rota.
-
-**Limitação:** em máquina com VPN, a rota padrão pode apontar para a VPN. Para
-controlar isso, seria necessário um parâmetro de interface ou usar o helper
-compartilhado de interfaces do projeto.
+**Observação:** agora o ICMP pode usar a mesma interface do ARP, evitando que
+cada módulo escolha uma rede diferente.
 
 ---
 
@@ -123,6 +135,7 @@ def varrer_rede_icmp(
     intervalo: float = 0.05,
     tarefas_concorrentes: int = 50,
     privilegiado: bool = False,
+    interface: NomeInterface | None = None,
 ) -> Set[Host]:
 ```
 
@@ -132,13 +145,14 @@ def varrer_rede_icmp(
 
 | Parâmetro | Tipo | Padrão | Descrição |
 |---|---|---|---|
-| `rede` | `str \| IPv4Network \| None` | `None` | Rede alvo em CIDR, IP base ou objeto `IPv4Network`. Se `None`, usa o IP local com `cidr`. |
-| `cidr` | `int` | `24` | Prefixo usado quando `rede` é `None` ou uma string sem `/`. |
+| `rede` | `str \| IPv4Network \| None` | `None` | Rede alvo em CIDR, IP base ou objeto `IPv4Network`. Se `None`, usa a rede real da interface. |
+| `cidr` | `int` | `24` | Prefixo usado quando `rede` é uma string sem `/`. Quando `rede` é `None`, a máscara real da interface é usada. |
 | `tempo_limite` | `float` | `2.0` | Tempo máximo de espera por resposta de cada pacote. |
 | `quantidade_pings` | `int` | `2` | Número de pacotes ICMP enviados por host. |
 | `intervalo` | `float` | `0.05` | Intervalo entre pacotes, em segundos. |
 | `tarefas_concorrentes` | `int` | `50` | Número máximo de pings simultâneos. |
 | `privilegiado` | `bool` | `False` | Usa socket privilegiado. No Windows é ignorado; no Linux pode exigir root ou `ping_group_range`. |
+| `interface` | `str \| None` | `None` | Interface usada para descobrir a rede e definir o IP de origem. Se `None`, usa a rota padrão. |
 
 **Retorno:** `Set[Host]` com apenas os hosts que responderam.
 
@@ -154,15 +168,19 @@ def varrer_rede_icmp(
 
 1. Valida `cidr`, `tempo_limite`, `quantidade_pings`, `intervalo`,
    `tarefas_concorrentes` e `privilegiado`.
-2. Resolve a rede:
-   - `None` → usa `obter_ip_local()` e `cidr`;
+2. Chama `obter_dados_rede(interface)`.
+3. Se `rede` for `None`, usa `dados.rede` (a máscara real da interface
+   prevalece sobre `cidr`).
+4. Usa `dados.ip_local` como IP de origem.
+4. Resolve a rede:
    - `IPv4Network` → usa o objeto;
    - `str` → aceita CIDR ou IP base; se não tiver `/`, acrescenta `cidr`.
-3. Verifica `MAXIMO_HOSTS_PADRAO` (65.536 endereços) para evitar redes
+5. Verifica `MAXIMO_HOSTS_PADRAO` (65.536 endereços) para evitar redes
    gigantes como `/0` ou `/8`.
-4. Gera a lista com `objeto_rede.hosts()`, que exclui rede e broadcast.
-5. Chama `multiping` com os parâmetros convertidos.
-6. Mantém apenas os hosts com `host.is_alive`.
+6. Gera a lista com `objeto_rede.hosts()`, que exclui rede e broadcast.
+7. Chama `multiping` com `source=ip_origem`, forçando a saída pela interface
+   escolhida.
+8. Mantém apenas os hosts com `host.is_alive`.
 
 **Exemplo simples:**
 
@@ -180,6 +198,7 @@ for endereco in sorted(host.address for host in hosts):
 ```python
 hosts = varrer_rede_icmp(
     rede="192.168.0.0/24",
+    interface="Ethernet",
     tempo_limite=2.0,
     quantidade_pings=2,
     intervalo=0.05,
@@ -225,6 +244,7 @@ interface = "Ethernet"
 
 hosts_icmp = varrer_rede_icmp(
     rede=rede,
+    interface=interface,
     quantidade_pings=1,
     tempo_limite=1.0,
 )
@@ -266,8 +286,9 @@ root com `privilegiado=True` ou configurar `net.ipv4.ping_group_range`.
 1. **Hosts que bloqueiam ICMP não aparecem.** Use o ARP para encontrá-los.
 2. **O IP local pode aparecer no resultado**, porque ele responde ao próprio
    ping. Decida na UI se ele deve ser exibido.
-3. **A rota padrão pode apontar para VPN.** O módulo não recebe uma interface
-   explícita; em máquina com VPN, o IP descoberto pode ser o da VPN.
+3. **A rota padrão pode apontar para VPN.** Quando `interface` não é informada,
+   o IP descoberto pode ser o da VPN. Passe `interface="Ethernet"`/`"Wi-Fi"`
+   para alinhar com o ARP.
 4. **Redes muito grandes são bloqueadas** por `MAXIMO_HOSTS_PADRAO = 65536`.
 5. **Não detecta portas.** A varredura de portas é feita pelo `ports.py`.
 6. **Não diferencia “offline” de “ICMP bloqueado”.** Isso é feito pelo

@@ -1,8 +1,9 @@
-from src.scanner.icmp import obter_ip_local, varrer_rede_icmp
+from src.network.interfaces import obter_dados_rede
+from src.scanner.icmp import varrer_rede_icmp
 
 
 if __name__ == "__main__":
-    print(f"IP local encontrado: {obter_ip_local()}")
+    print(f"IP local encontrado: {obter_dados_rede().ip_local}")
 
     hosts_encontrados = varrer_rede_icmp(quantidade_pings=4)
 
