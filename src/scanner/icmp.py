@@ -3,6 +3,7 @@ Módulo de escaneamento de rede via ICMP utilizando a biblioteca icmplib.
 """
 
 import ipaddress
+import math
 import socket
 from typing import Optional, Set, Union
 
@@ -16,10 +17,29 @@ from icmplib import (
     multiping,
 )
 
+# limite de segurança para evitar listas gigantes (ex: /0, /8)
+MAX_HOSTS_PADRAO = 65536
+
+def _validar_ip_local(local_ip: str) -> str:
+    """Valida o IP local e rejeita endereços inadequados para varredura."""
+    try:
+        ip_obj = ipaddress.IPv4Address(local_ip)
+    except ipaddress.AddressValueError as e:
+        raise OSError(f"Endereço IP local inválido: {local_ip!r}.") from e
+
+    if ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_unspecified:
+        raise OSError(
+            f"Endereço IP local inadequado para varredura: {local_ip}. "
+            "Verifique se a máquina possui um IP de rede local válido."
+        )
+
+    return str(ip_obj)
 
 def get_local_ip() -> str:
     """
     Obtém o endereço IP local da máquina na interface de rede ativa.
+
+    Rejeita endereços loopback, link-local e 0.0.0.0.
 
     :return: Endereço IPv4 local como string (ex: '192.168.1.10').
     :raises RuntimeError: Caso não seja possível determinar o endereço IP local.
@@ -27,23 +47,19 @@ def get_local_ip() -> str:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            if local_ip and local_ip != "0.0.0.0":
-                return local_ip
+            return _validar_ip_local(s.getsockname()[0])
     except OSError:
         pass
 
     try:
         local_ip = socket.gethostbyname(socket.gethostname())
-        if local_ip and local_ip != "0.0.0.0":
-            return local_ip
-        raise OSError("Endereço IP retornado pelo hostname é inválido (0.0.0.0).")
+        return _validar_ip_local(local_ip)
     except OSError as e:
         raise RuntimeError(
-            "Não foi possível obter o endereço IP local da máquina. "
-            "Verifique se há uma conexão de rede ativa."
+            "Não foi possível obter um endereço IP local válido para a varredura. "
+            "Verifique se há uma conexão de rede ativa e se o IP não é "
+            "loopback ou link-local."
         ) from e
-
 
 def scan_icmp_network(
     network: Optional[Union[str, ipaddress.IPv4Network]] = None,
@@ -70,9 +86,12 @@ def scan_icmp_network(
     :param interval: Intervalo (em segundos) entre o envio de cada pacote.
     :param concurrent_tasks: Número máximo de tarefas concorrentes para envio de pings.
     :param privileged: Define se o socket usará modo privilegiado (root/admin).
+                       No Linux, ``privileged=False`` pode exigir a configuração
+                       ``net.ipv4.ping_group_range``. No Windows, é ignorado.
     :return: Conjunto (set) contendo os objetos Host (icmplib.Host) dos hosts ativos.
     :raises TypeError: Se os tipos dos parâmetros forem inválidos.
-    :raises ValueError: Se os valores de rede, CIDR ou parâmetros de ping forem inválidos.
+    :raises ValueError: Se os valores de rede, CIDR ou parâmetros de ping forem
+                        inválidos, ou se a rede exceder MAX_HOSTS_PADRAO.
     :raises PermissionError: Se não houver permissão para abrir o socket ICMP.
     :raises MemoryError: Se a rede especificada gerar uma lista excessiva de hosts.
     :raises RuntimeError: Se ocorrer erro de rede ou socket durante o escaneamento.
@@ -80,14 +99,26 @@ def scan_icmp_network(
     if not isinstance(cidr, int) or isinstance(cidr, bool) or not (0 <= cidr <= 32):
         raise ValueError("O parâmetro 'cidr' deve ser um número inteiro entre 0 e 32.")
 
-    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
-        raise ValueError("O parâmetro 'timeout' deve ser um número maior que zero.")
+    if (
+        not isinstance(timeout, (int, float))
+        or isinstance(timeout, bool)
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise ValueError("O parâmetro 'timeout' deve ser um número finito maior que zero.")
 
     if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
         raise ValueError("O parâmetro 'count' deve ser um número inteiro maior que zero.")
 
-    if not isinstance(interval, (int, float)) or isinstance(interval, bool) or interval < 0:
-        raise ValueError("O parâmetro 'interval' deve ser um número maior ou igual a zero.")
+    if (
+        not isinstance(interval, (int, float))
+        or isinstance(interval, bool)
+        or not math.isfinite(interval)
+        or interval < 0
+    ):
+        raise ValueError(
+            "O parâmetro 'interval' deve ser um número finito maior ou igual a zero."
+        )
 
     if (
         not isinstance(concurrent_tasks, int)
@@ -123,7 +154,13 @@ def scan_icmp_network(
             f"Endereço de rede ou máscara CIDR inválida ('{network}'): {e}"
         ) from e
 
-    # Obtém apenas a faixa de endereços disponíveis para hosts (exclui rede e broadcast em /24)
+    if net_obj.num_addresses > MAX_HOSTS_PADRAO:
+        raise ValueError(
+            f"A rede '{net_obj}' possui {net_obj.num_addresses} endereços, "
+            f"acima do limite de {MAX_HOSTS_PADRAO}. Use uma rede menor."
+        )
+
+    # obtem apenas a faixa de endereços disponíveis para hosts (exclui rede e broadcast em /24)
     try:
         target_hosts = [str(ip) for ip in net_obj.hosts()]
     except MemoryError as e:
@@ -147,7 +184,8 @@ def scan_icmp_network(
     except (SocketPermissionError, PermissionError) as e:
         raise PermissionError(
             "Permissão insuficiente para criar o socket ICMP. "
-            "Execute como administrador/root ou utilize 'privileged=False'."
+            "No Linux, execute como root com 'privileged=True' ou configure "
+            "'net.ipv4.ping_group_range'. No Windows, execute como administrador."
         ) from e
     except SocketAddressError as e:
         raise RuntimeError(
@@ -166,5 +204,5 @@ def scan_icmp_network(
             f"Erro de sistema ou rede ao executar o multiping na rede '{net_obj}': {e}"
         ) from e
 
-    active_ips = {host for host in responses if host.is_alive}
-    return active_ips
+    active_hosts = {host for host in responses if host.is_alive}
+    return active_hosts
