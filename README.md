@@ -4,3 +4,4 @@ Ferramenta de inventário para redes domésticas capaz de mapear dispositivos at
 ## Documentação
 
 - [Mecanismo de Colisão / ARP](docs/arp.md)
+- [Ping Sweep com ICMP](docs/icmp.md)

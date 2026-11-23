@@ -1,7 +1,4 @@
-"""Descoberta ARP e detecção de conflitos IP/MAC para o NetProbe.
-
-Documentação detalhada: ``docs/arp.md``.
-"""
+"""Descoberta ARP e detecção de conflitos IP/MAC"""
 
 from __future__ import annotations
 

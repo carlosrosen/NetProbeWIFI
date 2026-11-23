@@ -1,5 +1,7 @@
 """
 Módulo de escaneamento de rede via ICMP utilizando a biblioteca icmplib.
+
+Documentação detalhada: ``docs/icmp.md``.
 """
 
 import ipaddress
@@ -18,8 +20,9 @@ from icmplib import (
 )
 
 
-# limite de segurança para evitar listas gigantes (ex: /0, /8)
+# Limite de segurança para evitar redes gigantes (ex.: /0, /8).
 MAXIMO_HOSTS_PADRAO = 65536
+
 
 def _validar_ip_local(ip_local: str) -> str:
     """Valida o IP local e rejeita endereços inadequados para varredura."""
@@ -42,13 +45,9 @@ def _validar_ip_local(ip_local: str) -> str:
 
 
 def obter_ip_local() -> str:
-    """
-    Obtém o endereço IP local da máquina na interface de rede ativa.
+    """Obtém o endereço IPv4 local da máquina.
 
-    Rejeita endereços loopback, link-local e 0.0.0.0.
-
-    :return: Endereço IPv4 local como string (ex: '192.168.1.10').
-    :raises RuntimeError: Caso não seja possível determinar o endereço IP local.
+    A documentação detalhada está em ``docs/icmp.md``.
     """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as soquete:
@@ -77,33 +76,10 @@ def varrer_rede_icmp(
     tarefas_concorrentes: int = 50,
     privilegiado: bool = False,
 ) -> Set[Host]:
-    """
-    Realiza um multiping ICMP para a faixa de endereços disponíveis para os hosts
-    na rede e retorna o conjunto de hosts ativos.
+    """Realiza um ping sweep ICMP e retorna os hosts ativos.
 
-    Caso nenhuma rede seja informada, obtém o IP da máquina automaticamente e
-    calcula a rede utilizando o CIDR padrão (/24).
-
-    :param rede: Rede alvo no formato CIDR (ex: '192.168.1.0/24'), IP base
-                 ou objeto IPv4Network. Se None, usa o IP local da máquina.
-    :param cidr: Prefixo CIDR padrão caso apenas um IP seja usado ou na detecção
-                 automática (padrão: 24).
-    :param tempo_limite: Tempo limite (em segundos) de espera por resposta de
-                         cada pacote.
-    :param quantidade_pings: Número de pacotes ICMP enviados para cada host.
-    :param intervalo: Intervalo (em segundos) entre o envio de cada pacote.
-    :param tarefas_concorrentes: Número máximo de tarefas concorrentes para
-                                 envio de pings.
-    :param privilegiado: Define se o socket usará modo privilegiado (root/admin).
-                         No Linux, ``privilegiado=False`` pode exigir a configuração
-                         ``net.ipv4.ping_group_range``. No Windows, é ignorado.
-    :return: Conjunto (set) contendo os objetos Host (icmplib.Host) dos hosts ativos.
-    :raises TypeError: Se os tipos dos parâmetros forem inválidos.
-    :raises ValueError: Se os valores de rede, CIDR ou parâmetros de ping forem
-                        inválidos, ou se a rede exceder MAXIMO_HOSTS_PADRAO.
-    :raises PermissionError: Se não houver permissão para abrir o socket ICMP.
-    :raises MemoryError: Se a rede especificada gerar uma lista excessiva de hosts.
-    :raises RuntimeError: Se ocorrer erro de rede ou socket durante o escaneamento.
+    A documentação detalhada dos parâmetros, retorno e exceções
+    está em ``docs/icmp.md``.
     """
     if (
         not isinstance(cidr, int)
@@ -190,7 +166,6 @@ def varrer_rede_icmp(
             f"acima do limite de {MAXIMO_HOSTS_PADRAO}. Use uma rede menor."
         )
 
-    # obtém apenas a faixa de endereços disponíveis para hosts (exclui endereço de rede e broadcast em /24)
     try:
         enderecos_alvo = [
             str(endereco_ip) for endereco_ip in objeto_rede.hosts()
