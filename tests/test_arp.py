@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from icmplib import Host
 from scapy.all import ARP, Ether
 
 from src.scanner import arp as arp_module
@@ -88,6 +89,22 @@ def test_filtra_apenas_ips_sem_resposta_icmp():
         resultados_arp,
         {"192.168.0.1", "192.168.0.11"},
     )
+
+    assert resultado == {"192.168.0.10": ["aa:bb:cc:dd:ee:02"]}
+
+
+def test_filtra_bloqueados_icmp_aceita_hosts_do_icmp():
+    resultados_arp = {
+        "192.168.0.1": ["aa:bb:cc:dd:ee:01"],
+        "192.168.0.10": ["aa:bb:cc:dd:ee:02"],
+        "192.168.0.11": ["aa:bb:cc:dd:ee:03"],
+    }
+    hosts_icmp = {
+        Host("192.168.0.1", 1, [1.0]),
+        "192.168.0.11",
+    }
+
+    resultado = filtrar_bloqueados_icmp(resultados_arp, hosts_icmp)
 
     assert resultado == {"192.168.0.10": ["aa:bb:cc:dd:ee:02"]}
 

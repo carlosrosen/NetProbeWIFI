@@ -1,9 +1,6 @@
-"""Descoberta ARP e detecção de conflitos IP/MAC para o NetProbe Wi-Fi.
+"""Descoberta ARP e detecção de conflitos IP/MAC para o NetProbe.
 
 Documentação detalhada: ``docs/arp.md``.
-
-O módulo é independente do scanner ICMP e da UI: não importa ``icmp.py``,
-não imprime nada e retorna ``dict[str, list[str]]``.
 """
 
 from __future__ import annotations
@@ -29,7 +26,6 @@ try:
 except ImportError:  # pragma: no cover - psutil está no requirements.txt
     psutil = None
 
-
 __all__ = [
     "ResultadoArp",
     "encontrar_conflitos",
@@ -53,15 +49,12 @@ SEGUNDOS_TEMPO_LIMITE_PADRAO = 1.0
 TENTATIVAS_PADRAO = 2
 INTERVALO_PADRAO_ENTRE_PACOTES = 0.0
 
-# API pública
+# Funções principais
 
-def obter_rede_local(
-    interface: NomeInterface | None = None,
-) -> tuple[NomeInterface, str]:
+def obter_rede_local(interface: NomeInterface | None = None) -> tuple[NomeInterface, str]:
     """Retorna ``(interface, rede)`` da rede IPv4 local.
 
     Se ``interface`` não for informada, usa a interface da rota padrão.
-    Documentação detalhada: ``docs/arp.md``.
     """
     interface = _resolver_interface(interface)
     rede_ipv4 = _obter_rede_do_sistema(interface)
@@ -88,9 +81,8 @@ def varrer_rede_arp(
     intervalo: float = INTERVALO_PADRAO_ENTRE_PACOTES,
 ) -> ResultadoArp:
     
-    """Descobre dispositivos IPv4 na rede local usando ARP.
-    Retorna {ip: [macs]}. Vários MACs no mesmo IP indicam conflito.
-    """
+    """Descobre dispositivos IPv4 na rede local usando ARP. Retorna {ip: [macs]}. Vários MACs no mesmo IP indicam conflito."""
+
     _validar_parametros_da_varredura(tempo_limite, tentativas, intervalo)
 
     ips_alvo, interface = _resolver_ips_alvo(alvos, rede, interface)
@@ -102,11 +94,19 @@ def varrer_rede_arp(
 
     return _converter_para_resultado_ordenado(respostas_por_ip)
 
-def filtrar_bloqueados_icmp(resultados_arp: Mapping[EnderecoIp, Iterable[EnderecoMac]],ips_ativos: Iterable[EnderecoIp]) -> ResultadoArp:
-    """Retorna entradas ARP cujo IP não respondeu ao ICMP."""
+def filtrar_bloqueados_icmp(
+    resultados_arp: Mapping[EnderecoIp, Iterable[EnderecoMac]],
+    ips_ativos: Iterable[object],
+) -> ResultadoArp:
+    """Retorna entradas ARP cujo IP não respondeu ao ICMP.
+
+    Aceita strings, ``IPv4Address`` ou objetos com atributo ``address``,
+    como os ``Host`` retornados pelo ``icmplib``.
+    """
     ips_ativos_normalizados = {
-        str(IPv4Address(endereco_ip)) for endereco_ip in ips_ativos
+        _normalizar_ip_ativo(item) for item in ips_ativos
     }
+
     return {
         endereco_ip: _normalizar_macs(enderecos_mac)
         for endereco_ip, enderecos_mac in resultados_arp.items()
@@ -126,10 +126,7 @@ def encontrar_conflitos(resultados_arp: Mapping[EnderecoIp, Iterable[EnderecoMac
 
 
 def encontrar_macs_duplicados(resultados_arp: Mapping[EnderecoIp, Iterable[EnderecoMac]]) -> dict[EnderecoMac, list[EnderecoIp]]:
-    """Retorna MACs associados a mais de um IP.
-
-    Não é necessariamente conflito (proxy ARP, múltiplos IPs etc.).
-    """
+    """Retorna MACs associados a mais de um IP. Não é necessariamente conflito (proxy ARP, múltiplos IPs etc)"""
     ips_por_mac: dict[EnderecoMac, set[EnderecoIp]] = defaultdict(set)
 
     for endereco_ip, enderecos_mac in resultados_arp.items():
@@ -149,7 +146,6 @@ def _resolver_interface(interface: NomeInterface | None) -> NomeInterface:
     if interface:
         return interface
     return conf.route.route("0.0.0.0")[0]
-
 
 def _obter_rede_do_sistema(interface: NomeInterface) -> str | None:
     """Tenta obter a rede IPv4 da interface via psutil."""
@@ -198,7 +194,6 @@ def _resolver_ips_alvo(alvos: Iterable[EnderecoIp] | EnderecoIp | None, rede: st
 
     return _ips_utilizaveis_da_rede(rede), interface
 
-
 def _normalizar_ips_alvo(alvos: Iterable[EnderecoIp] | EnderecoIp) -> list[EnderecoIp]:
     """Valida e normaliza os IPs informados pelo usuário."""
     if isinstance(alvos, str):
@@ -223,9 +218,7 @@ def _validar_parametros_da_varredura(tempo_limite: float,tentativas: int,interva
 # Construção e envio dos pacotes ARP
 
 def _montar_requisicoes_arp(ips_alvo: Sequence[EnderecoIp], interface: NomeInterface) -> list[Ether]:
-    """Monta uma requisição ARP broadcast para cada IP alvo.
-    O MAC e o IP de origem são definidos explicitamente a partir de ``interface``.
-    """
+    """Monta uma requisição ARP broadcast para cada IP alvo. O MAC e o IP de origem são definidos explicitamente a partir de ``interface``."""
     try:
         mac_origem = get_if_hwaddr(interface)
         ip_origem = get_if_addr(interface)
@@ -311,6 +304,24 @@ def _converter_para_resultado_ordenado(respostas_por_ip: Mapping[EnderecoIp, Ite
 def _normalizar_macs(enderecos_mac: Iterable[EnderecoMac]) -> list[EnderecoMac]:
     """Retorna MACs em minúsculo, sem duplicatas e ordenados."""
     return sorted({endereco_mac.lower() for endereco_mac in enderecos_mac})
+
+def _normalizar_ip_ativo(item: object) -> EnderecoIp:
+    """Converte string, IPv4Address ou objeto com address em IP canônico."""
+    if isinstance(item, str):
+        endereco = item.strip()
+    elif isinstance(item, IPv4Address):
+        endereco = str(item)
+    else:
+        endereco = getattr(item, "address", None)
+        if isinstance(endereco, IPv4Address):
+            endereco = str(endereco)
+        elif not isinstance(endereco, str):
+            raise TypeError(
+                "Cada item de 'ips_ativos' deve ser uma string de IP, "
+                "IPv4Address ou um objeto com atributo 'address'."
+            )
+        endereco = endereco.strip()
+    return str(IPv4Address(endereco))
 
 # ---------------------------------------------------------------------------
 # Teste manual

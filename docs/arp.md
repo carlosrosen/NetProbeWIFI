@@ -215,21 +215,24 @@ responderam ao ping.
 
 **Parâmetros:**
 
-| Parâmetro        | Tipo                          | Descrição                              |
-| ---------------- | ----------------------------- | -------------------------------------- |
-| `resultados_arp` | `Mapping[str, Iterable[str]]` | Resultado de `varrer_rede_arp`.        |
-| `ips_ativos`     | `Iterable[str]`               | IPs que o módulo ICMP encontrou vivos. |
+| Parâmetro        | Tipo                                             | Descrição                                                                 |
+| ---------------- | ------------------------------------------------ | ------------------------------------------------------------------------- |
+| `resultados_arp` | `Mapping[str, Iterable[str]]`                    | Resultado de `varrer_rede_arp`.                                           |
+| `ips_ativos`     | `Iterable[str \| IPv4Address \| Host]`           | IPs vivos; aceita strings, `IPv4Address` ou objetos com atributo `address`. |
 
 **Retorno:** subconjunto de `resultados_arp` cujos IPs não estão em
 `ips_ativos`.
 
 **Como funciona:**
 
-1. Normaliza `ips_ativos` com `IPv4Address` para comparar strings canônicas.
+1. Normaliza cada item de `ips_ativos` com `_normalizar_ip_ativo`:
+   - `str` → `IPv4Address`;
+   - `IPv4Address` → string canônica;
+   - objeto com `.address` (como `icmplib.Host`) → usa o endereço.
 2. Percorre `resultados_arp` e mantém apenas os IPs que não aparecem em
    `ips_ativos`.
 
-**Exemplo:**
+**Exemplo com strings:**
 
 ```python
 from src.scanner.arp import filtrar_bloqueados_icmp, varrer_rede_arp
@@ -239,6 +242,22 @@ ips_ativos = {"192.168.0.1", "192.168.0.11"}
 
 bloqueados = filtrar_bloqueados_icmp(resultados_arp, ips_ativos)
 ```
+
+**Exemplo com Hosts do ICMP:**
+
+```python
+from icmplib import Host
+
+hosts_icmp = {
+    Host("192.168.0.1", 1, [1.0]),
+    Host("192.168.0.11", 1, [2.0]),
+}
+
+bloqueados = filtrar_bloqueados_icmp(resultados_arp, hosts_icmp)
+```
+
+Isso permite passar diretamente o retorno de `varrer_rede_icmp`, que devolve
+`Set[Host]`.
 
 Se `resultados_arp` tem `192.168.0.10` e ele não está em `ips_ativos`, ele
 entra em `bloqueados`: está online, mas bloqueia ICMP.
