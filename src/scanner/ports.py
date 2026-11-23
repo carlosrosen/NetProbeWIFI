@@ -6,7 +6,7 @@ import math
 import socket
 
 
-def _validar_parametros(ip: str, inicio: int, fim: int, timeout: float) -> None:
+def _validar_parametros(ip: str, inicio: int, fim: int, ignorar: list[int] | None, timeout: float) -> None:
     """Valida os parâmetros da varredura de portas."""
     if not isinstance(ip, str) or not ip.strip():
         raise ValueError("O IP/hostname não pode ser vazio.")
@@ -16,6 +16,16 @@ def _validar_parametros(ip: str, inicio: int, fim: int, timeout: float) -> None:
 
     if not isinstance(fim, int) or isinstance(fim, bool):
         raise TypeError("A porta final deve ser um número inteiro.")
+
+    if ignorar is not None:
+        if not isinstance(ignorar, list):
+             raise TypeError("O parâmetro 'ignorar' deve ser uma lista de inteiros ou None.")
+
+        for porta in ignorar:
+            if not isinstance(porta, int) or isinstance(porta, bool):
+                raise TypeError("Todas as portas em 'ignorar' devem ser números inteiros.")
+            if not (1 <= porta <= 65535):
+                    raise ValueError("Todas as portas em 'ignorar' devem estar entre 1 e 65535.")
 
     if not (1 <= inicio <= fim <= 65535):
         raise ValueError(
@@ -32,7 +42,7 @@ def _validar_parametros(ip: str, inicio: int, fim: int, timeout: float) -> None:
         raise ValueError("O timeout deve ser um número finito maior que zero.")
 
 
-def scan_ports(ip: str, inicio: int, fim: int,timeout: float = 1.0) -> tuple[int, list[int]]:
+def scan_ports(ip: str, inicio: int, fim: int, ignorar: list[int] | None = None, timeout: float = 1.0) -> tuple[int, list[int]]:
     """
     Realiza uma varredura de portas TCP em um endereço IPv4.
 
@@ -40,6 +50,7 @@ def scan_ports(ip: str, inicio: int, fim: int,timeout: float = 1.0) -> tuple[int
         ip (str): Endereço IPv4 ou hostname do alvo.
         inicio (int): Número da porta inicial da varredura.
         fim (int): Número da porta final da varredura.
+        ignorar (list[int]): Lista com os números das portas que devem ser ignoradas.
         timeout (float): Tempo máximo de espera por porta, em segundos.
 
     Funcionamento:
@@ -60,22 +71,24 @@ def scan_ports(ip: str, inicio: int, fim: int,timeout: float = 1.0) -> tuple[int
         ValueError: Se o IP, o intervalo de portas ou o timeout forem inválidos.
         TypeError: Se as portas não forem números inteiros.
     """
-    _validar_parametros(ip, inicio, fim, timeout)
+    _validar_parametros(ip, inicio, fim, ignorar, timeout)
+    ignorar_set = set(ignorar or [])
 
     try:
         endereco = socket.gethostbyname(ip.strip())
         abertas = []
 
         for porta in range(inicio, fim + 1):
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    sock.settimeout(timeout)
+            if porta not in ignorar_set:
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                        sock.settimeout(timeout)
 
-                    if sock.connect_ex((endereco, porta)) == 0:
-                        abertas.append(porta)
+                        if sock.connect_ex((endereco, porta)) == 0:
+                            abertas.append(porta)
 
-            except OSError:
-                continue
+                except OSError:
+                    continue
 
         return len(abertas), abertas
 
