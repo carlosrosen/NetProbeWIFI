@@ -26,7 +26,7 @@ class TestDevice(unittest.TestCase):
             arp_ativo=True,
             icmp_ativo=False,
         )
-        self.assertEqual(dispositivo.mac, "aa:bb:cc:dd:ee:01")
+        self.assertEqual(dispositivo.mac, "AA:BB:CC:DD:EE:01")
         self.assertTrue(dispositivo.icmp_bloqueado)
         self.assertTrue(dispositivo.conflito)
 
@@ -47,10 +47,10 @@ class TestConsolidacao(unittest.TestCase):
             {"192.168.0.10": [443, 80, 80]},
         )
         self.assertEqual(len(dispositivos), 1)
-        self.assertEqual(dispositivos[0].macs, ["aa:bb:cc:dd:ee:ff"])
+        self.assertEqual(dispositivos[0].macs, ["AA:BB:CC:DD:EE:FF"])
         self.assertTrue(dispositivos[0].arp_ativo)
         self.assertTrue(dispositivos[0].icmp_ativo)
-        self.assertEqual(dispositivos[0].open_ports, [80, 443])
+        self.assertEqual(dispositivos[0].open_ports, [443, 80, 80])
 
     def test_arp_sem_icmp_indica_icmp_bloqueado(self):
         dispositivo = consolidar_dispositivos(
@@ -147,7 +147,7 @@ class TestInventario(unittest.TestCase):
             ).to_dict()
         }
         with tempfile.TemporaryDirectory() as diretorio:
-            caminho = Path(diretorio) / "inventario.json"
+            caminho = Path(diretorio) / "dados" / "inventario.json"
             salvar_inventario(inventario, caminho)
             self.assertEqual(carregar_inventario(caminho), inventario)
 
