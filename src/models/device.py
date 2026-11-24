@@ -116,10 +116,7 @@ def carregar_inventario(caminho: str | Path = CAMINHO_INVENTARIO) -> dict[str, A
     return inventario
 
 
-def salvar_inventario(
-    inventario: Mapping[str, Any],
-    caminho: str | Path = CAMINHO_INVENTARIO,
-) -> None:
+def salvar_inventario(inventario: Mapping[str, Any], caminho: str | Path = CAMINHO_INVENTARIO) -> None:
     """Salva o inventario em JSON de forma legivel."""
     caminho_arquivo = Path(caminho)
     caminho_arquivo.parent.mkdir(parents=True, exist_ok=True)
