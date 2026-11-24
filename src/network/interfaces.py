@@ -53,11 +53,17 @@ def obter_dados_rede(interface: NomeInterface | None = None) -> DadosRede:
     )
 
 def _resolver_interface(interface: NomeInterface | None) -> NomeInterface:
-    """Retorna uma interface concreta, usando a rota padrão como alternativa."""
+    """Retorna uma interface concreta, com o nome amigável quando possível."""
 
-    if interface:
+    if not interface:
+        interface = conf.route.route("0.0.0.0")[0]
+
+    try:
+        nome_amigavel = resolve_iface(interface).name
+    except Exception:
         return interface
-    return conf.route.route("0.0.0.0")[0]
+
+    return nome_amigavel or interface
 
 def _validar_ip_local(ip_local: str) -> str:
     """Valida o IP local e rejeita endereços inadequados para varredura."""
