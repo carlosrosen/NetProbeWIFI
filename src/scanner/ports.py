@@ -4,9 +4,16 @@ Módulo de varredura de portas TCP.
 
 import math
 import socket
+from concurrent.futures import ThreadPoolExecutor
 
 
-def _validar_parametros(ip: str, inicio: int, fim: int, ignorar: list[int] | None, timeout: float) -> None:
+def _validar_parametros(
+    ip: str,
+    inicio: int,
+    fim: int,
+    ignorar: list[int] | None,
+    timeout: float
+) -> None: 
     """Valida os parâmetros da varredura de portas."""
     if not isinstance(ip, str) or not ip.strip():
         raise ValueError("O IP/hostname não pode ser vazio.")
@@ -19,13 +26,23 @@ def _validar_parametros(ip: str, inicio: int, fim: int, ignorar: list[int] | Non
 
     if ignorar is not None:
         if not isinstance(ignorar, list):
-             raise TypeError("O parâmetro 'ignorar' deve ser uma lista de inteiros ou None.")
+            raise TypeError(
+                "O parâmetro 'ignorar' deve ser uma lista de "
+                "inteiros ou None."
+            )
 
         for porta in ignorar:
             if not isinstance(porta, int) or isinstance(porta, bool):
-                raise TypeError("Todas as portas em 'ignorar' devem ser números inteiros.")
+                raise TypeError(
+                    "Todas as portas em 'ignorar' devem ser "
+                    "números inteiros."
+                )
+
             if not (1 <= porta <= 65535):
-                    raise ValueError("Todas as portas em 'ignorar' devem estar entre 1 e 65535.")
+                raise ValueError(
+                    "Todas as portas em 'ignorar' devem estar "
+                    "entre 1 e 65535."
+                )
 
     if not (1 <= inicio <= fim <= 65535):
         raise ValueError(
@@ -42,33 +59,61 @@ def _validar_parametros(ip: str, inicio: int, fim: int, ignorar: list[int] | Non
         raise ValueError("O timeout deve ser um número finito maior que zero.")
 
 
-def scan_ports(ip: str, inicio: int, fim: int, ignorar: list[int] | None = None, timeout: float = 1.0) -> tuple[int, list[int]]:
+def _verificar_porta(endereco: str, porta: int, timeout:float) -> int | None: 
+    """Verifica se uma porta está aberta no endereço informado."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+    
+            if sock.connect_ex((endereco, porta)) == 0:
+                return porta
+    
+    except OSError:
+        pass
+    
+    return None
+
+
+def scan_ports(
+    ip: str,
+    inicio: int,
+    fim: int,
+    ignorar: list[int] | None = None,
+    timeout: float = 1.0,
+    max_workers: int = 100
+) -> tuple[int, list[int]]: 
     """
     Realiza uma varredura de portas TCP em um endereço IPv4.
 
-    Entradas:
+    Parâmetros:
         ip (str): Endereço IPv4 ou hostname do alvo.
         inicio (int): Número da porta inicial da varredura.
         fim (int): Número da porta final da varredura.
-        ignorar (list[int]): Lista com os números das portas que devem ser ignoradas.
-        timeout (float): Tempo máximo de espera por porta, em segundos.
+        ignorar (list[int] | None): Lista com os números das portas
+            que devem ser ignoradas.
+        timeout (float): Tempo máximo de espera por conexão, em
+            segundos.
+        max_workers (int): Número máximo de threads utilizadas
+            simultaneamente na varredura. 
 
     Funcionamento:
         Resolve o endereço informado para IPv4 e percorre o intervalo
-        de portas especificado, tentando estabelecer uma conexão TCP
-        com cada porta. As portas que aceitarem a conexão são
-        armazenadas em uma lista.
+            de portas especificado, tentando estabelecer uma conexão
+            TCP com cada porta. As portas que aceitarem a conexão são
+            armazenadas em uma lista.
 
-    Saídas:
-        tuple: Retorna dois valores:
+    Retorno:
+        tuple[int, list[int]]: Retorna dois valores:
             - quantidade (int): Número de portas abertas encontradas.
-            - abertas (list): Lista com os números das portas abertas.
+            - abertas (list[int]): Lista com os números das portas
+                abertas.
 
         Em caso de erro de resolução do endereço ou de execução,
-        retorna (-1, []).
+            retorna (-1, []).
 
     Exceções:
-        ValueError: Se o IP, o intervalo de portas ou o timeout forem inválidos.
+        ValueError: Se o IP, o intervalo de portas ou o timeout forem
+            inválidos.
         TypeError: Se as portas não forem números inteiros.
     """
     _validar_parametros(ip, inicio, fim, ignorar, timeout)
@@ -76,19 +121,24 @@ def scan_ports(ip: str, inicio: int, fim: int, ignorar: list[int] | None = None,
 
     try:
         endereco = socket.gethostbyname(ip.strip())
-        abertas = []
 
-        for porta in range(inicio, fim + 1):
-            if porta not in ignorar_set:
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                        sock.settimeout(timeout)
+        portas_alvo = [
+            porta
+            for porta in range(inicio, fim + 1)
+            if porta not in ignorar_set
+        ]
 
-                        if sock.connect_ex((endereco, porta)) == 0:
-                            abertas.append(porta)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            resultados = executor.map(
+                lambda porta: _verificar_porta(endereco, porta, timeout),
+                portas_alvo
+            )
 
-                except OSError:
-                    continue
+        abertas = sorted(
+            porta
+            for porta in resultados
+            if porta is not None
+        )
 
         return len(abertas), abertas
 
