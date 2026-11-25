@@ -1,5 +1,5 @@
-scapy
-rich
-psutil
-icmplib
-pytest
+scapy==2.8.0
+rich==15.0.0
+psutil==7.2.2
+icmplib==3.0.4
+pytest==9.2.0

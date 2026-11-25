@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import sys
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -28,6 +29,15 @@ if not __package__:
 if TYPE_CHECKING:
     from src.models.device import Device
     from src.network.discovery import ResultadoDescoberta
+
+
+def _limpar_tela(console: Console) -> None:
+    """Limpa a tela do terminal, usando cls no Windows."""
+    if os.name == "nt":
+        if sys.stdout.isatty() or console.is_terminal:
+            os.system("cls")
+    elif console.is_terminal:
+        console.clear()
 
 
 @dataclass(frozen=True)
@@ -128,12 +138,15 @@ def _texto_intervalo(portas: tuple[int, int] | None) -> str:
 
 def _personalizar(console: Console, opcoes: Opcoes) -> Opcoes:
     while True:
-        console.print("\n[bold]Personalizar varredura[/bold]")
+        _limpar_tela(console)
+        console.print("[bold]Personalizar varredura[/bold]")
         console.print("1. Interface e rede\n2. ICMP (ping)\n3. Portas TCP\n4. ARP\n0. Voltar")
         escolha = Prompt.ask("Opção", choices=["1", "2", "3", "4", "0"], console=console)
 
         if escolha == "0":
             return opcoes
+
+        _limpar_tela(console)
         if escolha == "1":
             interface = Prompt.ask("Interface (nome ou auto)", default=opcoes.interface or "auto", console=console)
             opcoes = replace(opcoes, interface=_automatico(interface), rede=_pedir_rede(console, opcoes.rede))
@@ -252,7 +265,6 @@ def _varrer(console: Console, opcoes: Opcoes) -> None:
             tentativas_arp=opcoes.tentativas_arp, intervalo_arp=opcoes.intervalo_arp,
         )
 
-    console.print()
     console.print(_tabela_varredura(opcoes, resultado))
     dispositivos = resultado.dispositivos
     if dispositivos:
@@ -272,10 +284,15 @@ def _varrer(console: Console, opcoes: Opcoes) -> None:
 def main() -> None:
     console = Console()
     opcoes = Opcoes()
-    console.print("[bold cyan]NetProbe Wi-Fi[/bold cyan]")
+    primeira_vez = True
 
     try:
         while True:
+            if not primeira_vez:
+                _limpar_tela(console)
+            primeira_vez = False
+
+            console.print("[bold cyan]NetProbe Wi-Fi[/bold cyan]")
             interface = opcoes.interface or "automática"
             rede = opcoes.rede or "automática"
             console.print(f"\nInterface: {interface} | Rede: {rede} | Verificação TCP: {_texto_intervalo(opcoes.portas)}", markup=False)
@@ -286,10 +303,17 @@ def main() -> None:
             if escolha == "2":
                 opcoes = _personalizar(console, opcoes)
             else:
+                _limpar_tela(console)
                 try:
                     _varrer(console, opcoes)
                 except (ImportError, OSError, RuntimeError, ValueError) as erro:
                     console.print(f"Falha na varredura. {erro}", style="red", markup=False)
+                Prompt.ask(
+                    "\nPressione Enter para voltar ao menu",
+                    default="",
+                    show_default=False,
+                    console=console,
+                )
     except EOFError:
         return
     except KeyboardInterrupt:
