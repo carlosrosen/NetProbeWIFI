@@ -30,7 +30,6 @@ if str(RAIZ_PROJETO) not in sys.path:
 
 from src.models.device import CAMINHO_INVENTARIO, carregar_inventario
 from src.network.discovery import (
-    QUANTIDADE_PORTAS_PADRAO,
     ResultadoDescoberta,
     descobrir_dispositivos,
 )
@@ -55,10 +54,10 @@ def criar_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--quantidade-portas",
         type=int,
-        default=QUANTIDADE_PORTAS_PADRAO,
+        default=100,
         help=(
             "Quantidade de portas a escanear, de 1 ate N. "
-            f"Padrao: {QUANTIDADE_PORTAS_PADRAO}."
+            "Padrao: 100."
         ),
     )
     parser.add_argument(
@@ -69,8 +68,32 @@ def criar_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tempo-limite-porta",
         type=float,
-        default=0.3,
+        default=0.5,
         help="Timeout de cada porta, em segundos.",
+    )
+    parser.add_argument(
+        "--tarefas-icmp",
+        type=int,
+        default=50,
+        help="Numero de tarefas ICMP simultaneas.",
+    )
+    parser.add_argument(
+        "--tempo-limite-arp",
+        type=float,
+        default=3.0,
+        help="Timeout do ARP, em segundos.",
+    )
+    parser.add_argument(
+        "--tentativas-arp",
+        type=int,
+        default=3,
+        help="Numero de tentativas do ARP.",
+    )
+    parser.add_argument(
+        "--intervalo-arp",
+        type=float,
+        default=0.01,
+        help="Intervalo entre pacotes ARP, em segundos.",
     )
     parser.add_argument(
         "--sem-salvar",
@@ -145,6 +168,10 @@ def main() -> int:
             rede=args.rede,
             quantidade_portas=quantidade_portas,
             tempo_limite_porta=args.tempo_limite_porta,
+            tarefas_concorrentes_icmp=args.tarefas_icmp,
+            tempo_limite_arp=args.tempo_limite_arp,
+            tentativas_arp=args.tentativas_arp,
+            intervalo_arp=args.intervalo_arp,
             salvar=not args.sem_salvar,
         )
     except Exception as erro:
