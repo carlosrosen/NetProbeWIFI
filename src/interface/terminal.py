@@ -26,6 +26,8 @@ except ModuleNotFoundError as erro:
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.network.limits import MAXIMO_SEGUNDOS
+
 if TYPE_CHECKING:
     from src.models.device import Device
     from src.network.discovery import ResultadoDescoberta
@@ -55,6 +57,12 @@ class Opcoes:
     portas: tuple[int, int] | None = (1, 100)
     concorrencia_tcp: int = 100
     portas_excluidas: tuple[int, ...] = ()
+    privilegiado: bool = False
+
+
+def _privilegiado_padrao() -> bool:
+    getter = getattr(os, "geteuid", None)
+    return bool(getter and getter() == 0)
 
 
 def _automatico(valor: str) -> str | None:
@@ -74,17 +82,37 @@ def _pedir_rede(console: Console, atual: IPv4Network | None) -> IPv4Network | No
             console.print("Informe uma rede IPv4 como 192.168.1.0/24.", style="yellow")
 
 
-def _pedir_segundos(console: Console, rotulo: str, atual: float, *, aceita_zero: bool = False) -> float:
+def _pedir_segundos(
+    console: Console,
+    rotulo: str,
+    atual: float,
+    *,
+    aceita_zero: bool = False,
+    maximo: float = MAXIMO_SEGUNDOS,
+) -> float:
     while True:
         valor = Prompt.ask(f"{rotulo} (s)", default=str(atual).replace(".", ","), console=console)
         try:
             segundos = float(valor.replace(",", "."))
-            if math.isfinite(segundos) and (segundos > 0 or aceita_zero and segundos == 0):
+            if (
+                math.isfinite(segundos)
+                and segundos <= maximo
+                and (segundos > 0 or aceita_zero and segundos == 0)
+            ):
                 return segundos
         except ValueError:
             pass
-        limite = "maior ou igual a zero" if aceita_zero else "maior que zero"
-        console.print(f"Informe um valor em segundos {limite}.", style="yellow")
+
+        if aceita_zero:
+            console.print(
+                f"Informe um valor em segundos entre 0 e {maximo:g}.",
+                style="yellow",
+            )
+        else:
+            console.print(
+                f"Informe um valor em segundos maior que zero e menor ou igual a {maximo:g}.",
+                style="yellow",
+            )
 
 
 def _pedir_inteiro(
@@ -151,12 +179,19 @@ def _personalizar(console: Console, opcoes: Opcoes) -> Opcoes:
             interface = Prompt.ask("Interface (nome ou auto)", default=opcoes.interface or "auto", console=console)
             opcoes = replace(opcoes, interface=_automatico(interface), rede=_pedir_rede(console, opcoes.rede))
         elif escolha == "2":
+            privilegiado = Prompt.ask(
+                "Usar ICMP privilegiado (root/admin)?",
+                choices=["s", "n"],
+                default="s" if opcoes.privilegiado else "n",
+                console=console,
+            )
             opcoes = replace(
                 opcoes,
                 timeout_icmp=_pedir_segundos(console, "Timeout ICMP", opcoes.timeout_icmp),
                 quantidade_pings=_pedir_inteiro(console, "Pings por IP", opcoes.quantidade_pings),
                 intervalo_icmp=_pedir_segundos(console, "Intervalo entre pings", opcoes.intervalo_icmp, aceita_zero=True),
                 concorrencia_icmp=_pedir_inteiro(console, "Tarefas ICMP simultâneas", opcoes.concorrencia_icmp),
+                privilegiado=privilegiado == "s",
             )
         elif escolha == "3":
             opcoes = _personalizar_tcp(console, opcoes)
@@ -227,7 +262,8 @@ def _tabela_varredura(opcoes: Opcoes, resultado: ResultadoDescoberta) -> Table:
 
     tabela.add_row(
         "ICMP", f"Pings por IP: {opcoes.quantidade_pings}  |  Timeout ICMP: {opcoes.timeout_icmp:g} s\n"
-        f"Intervalo ICMP: {opcoes.intervalo_icmp:g} s  |  Tarefas ICMP simultâneas: {opcoes.concorrencia_icmp}",
+        f"Intervalo ICMP: {opcoes.intervalo_icmp:g} s  |  Tarefas ICMP simultâneas: {opcoes.concorrencia_icmp}\n"
+        f"ICMP privilegiado: {'Sim' if opcoes.privilegiado else 'Não'}",
     )
     tabela.add_row(
         "ARP", f"Timeout ARP: {opcoes.timeout_arp:g} s  |  Reenvios ARP: {opcoes.tentativas_arp}\n"
@@ -245,7 +281,8 @@ def _tabela_varredura(opcoes: Opcoes, resultado: ResultadoDescoberta) -> Table:
     conflitos = sum(item.arp_ativo and item.conflito for item in resultado.dispositivos)
     bloqueados = sum(item.icmp_bloqueado for item in resultado.dispositivos)
     tabela.add_row(
-        "Resumo", f"Online: {len(resultado.online)}  |  Offline: {len(resultado.offline)}\n"
+        "Resumo", f"Online: {len(resultado.online)}  |  Offline: {len(resultado.offline)}  |  "
+        f"Desconhecidos: {len(resultado.desconhecidos)}\n"
         f"ICMP bloqueado: {bloqueados}  |  Conflitos de IP: {conflitos}",
     )
     return tabela
@@ -261,9 +298,13 @@ def _varrer(console: Console, opcoes: Opcoes) -> None:
             portas_excluidas=opcoes.portas_excluidas, concorrencia_portas=opcoes.concorrencia_tcp,
             tempo_limite_porta=opcoes.timeout_tcp, tempo_limite_icmp=opcoes.timeout_icmp,
             quantidade_pings=opcoes.quantidade_pings, intervalo_icmp=opcoes.intervalo_icmp,
-            tarefas_concorrentes_icmp=opcoes.concorrencia_icmp, tempo_limite_arp=opcoes.timeout_arp,
-            tentativas_arp=opcoes.tentativas_arp, intervalo_arp=opcoes.intervalo_arp,
+            tarefas_concorrentes_icmp=opcoes.concorrencia_icmp, privilegiado=opcoes.privilegiado,
+            tempo_limite_arp=opcoes.timeout_arp, tentativas_arp=opcoes.tentativas_arp,
+            intervalo_arp=opcoes.intervalo_arp,
         )
+
+    for aviso in resultado.avisos:
+        console.print(f"Aviso: {aviso}", style="yellow", markup=False)
 
     console.print(_tabela_varredura(opcoes, resultado))
     dispositivos = resultado.dispositivos
@@ -283,7 +324,7 @@ def _varrer(console: Console, opcoes: Opcoes) -> None:
 
 def main() -> None:
     console = Console()
-    opcoes = Opcoes()
+    opcoes = Opcoes(privilegiado=_privilegiado_padrao())
     primeira_vez = True
 
     try:
@@ -306,7 +347,7 @@ def main() -> None:
                 _limpar_tela(console)
                 try:
                     _varrer(console, opcoes)
-                except (ImportError, OSError, RuntimeError, ValueError) as erro:
+                except Exception as erro:
                     console.print(f"Falha na varredura. {erro}", style="red", markup=False)
                 Prompt.ask(
                     "\nPressione Enter para voltar ao menu",

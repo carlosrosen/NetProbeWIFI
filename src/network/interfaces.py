@@ -56,7 +56,16 @@ def _resolver_interface(interface: NomeInterface | None) -> NomeInterface:
     """Retorna uma interface concreta, com o nome amigável quando possível."""
 
     if not interface:
-        interface = conf.route.route("0.0.0.0")[0]
+        try:
+            rota = conf.route.route("0.0.0.0")
+        except Exception as erro:
+            raise RuntimeError(
+                "Não foi possível determinar a interface da rota padrão. Verifique as configurações de rede do sistema."
+            ) from erro
+
+        if not rota or not rota[0]:
+            raise RuntimeError("Não foi possível determinar a interface da rota padrão. Informe a interface manualmente.")
+        interface = rota[0]
 
     try:
         nome_amigavel = resolve_iface(interface).name
@@ -81,7 +90,10 @@ def _validar_ip_local(ip_local: str) -> str:
 def _obter_ip_validado(interface: NomeInterface) -> str:
     """Obtém e valida o IPv4 de uma interface."""
 
-    ip_local = get_if_addr(interface)
+    try:
+        ip_local = get_if_addr(interface)
+    except Exception as erro:
+        raise RuntimeError(f"Não foi possível consultar o IPv4 da interface {interface!r}: {erro}") from erro
 
     if not ip_local or ip_local == "0.0.0.0":
         raise RuntimeError(f"Não foi possível descobrir o IPv4 da interface {interface!r}.")
@@ -97,24 +109,53 @@ def _obter_dados_do_sistema(interface: NomeInterface) -> DadosRede | None:
     if psutil is None:
         return None
 
-    enderecos_da_interface = psutil.net_if_addrs()
+    try:
+        enderecos_da_interface = psutil.net_if_addrs()
+    except Exception:
+        return None
+
+    try:
+        ip_da_interface = get_if_addr(interface)
+    except Exception:
+        ip_da_interface = None
+
+    candidatos: list[DadosRede] = []
+    vistos: set[str] = set()
+
     for nome_da_interface in _candidatos_de_nome_da_interface(interface):
         for endereco in enderecos_da_interface.get(nome_da_interface, []):
             if endereco.family != FAMILIA_IPV4 or not endereco.netmask:
                 continue
 
-            rede_ipv4 = IPv4Network(
-                f"{endereco.address}/{endereco.netmask}",
-                strict=False,
+            try:
+                ip_local = _validar_ip_local(str(endereco.address))
+                rede_ipv4 = IPv4Network(
+                    f"{ip_local}/{endereco.netmask}",
+                    strict=False,
+                )
+            except (OSError, ValueError):
+                continue
+
+            if ip_local in vistos:
+                continue
+
+            vistos.add(ip_local)
+            candidatos.append(
+                DadosRede(
+                    interface=interface,
+                    ip_local=ip_local,
+                    rede=str(rede_ipv4),
+                    mascara=str(endereco.netmask),
+                )
             )
 
-            return DadosRede(
-                interface=interface,
-                ip_local=str(endereco.address),
-                rede=str(rede_ipv4),
-                mascara=str(endereco.netmask),
-            )
-    return None
+    if not candidatos:
+        return None
+
+    if ip_da_interface:
+        candidatos.sort(key=lambda dados: dados.ip_local != ip_da_interface)
+
+    return candidatos[0]
 
 def _candidatos_de_nome_da_interface(interface: NomeInterface) -> list[str]:
     """Retorna os nomes possíveis da interface para consultar o psutil."""

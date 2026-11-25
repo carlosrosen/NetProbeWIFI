@@ -26,6 +26,7 @@ class ResultadoDescoberta:
     dispositivos: list[Device]
     rede_varrida: IPv4Network | None = None
     portas_verificadas: dict[str, list[int] | None] | None = None
+    avisos: tuple[str, ...] = ()
 
     @property
     def online(self) -> list[Device]:
@@ -43,6 +44,15 @@ class ResultadoDescoberta:
             dispositivo
             for dispositivo in self.dispositivos
             if dispositivo.status == "offline"
+        ]
+
+    @property
+    def desconhecidos(self) -> list[Device]:
+        """Dispositivos cujo estado nao pode ser confirmado nesta varredura."""
+        return [
+            dispositivo
+            for dispositivo in self.dispositivos
+            if dispositivo.status == "unknown"
         ]
 
 
@@ -64,10 +74,12 @@ def descobrir_dispositivos(
     portas_excluidas: tuple[int, ...] = (),
     concorrencia_portas: int | None = None,
     limitar_rede_local: bool = False,
+    privilegiado: bool = False,
 ) -> ResultadoDescoberta:
     """Descobre dispositivos. Um intervalo explícito tem prioridade sobre quantidade_portas."""
 
     _validar_quantidade_portas(quantidade_portas)
+
     if intervalo_portas is not None:
         inicio, fim = intervalo_portas
         if not 1 <= inicio <= fim <= 65535:
@@ -85,6 +97,7 @@ def descobrir_dispositivos(
         "tempo_limite": tempo_limite_icmp,
         "quantidade_pings": quantidade_pings,
         "tarefas_concorrentes": tarefas_concorrentes_icmp,
+        "privilegiado": privilegiado,
     }
     if intervalo_icmp is not None:
         icmp_args["intervalo"] = intervalo_icmp
@@ -97,11 +110,30 @@ def descobrir_dispositivos(
         "intervalo": intervalo_arp,
     }
 
+    avisos: list[str] = []
+    falha_icmp = False
+    falha_arp = False
+
     with ThreadPoolExecutor(max_workers=2) as executor:
         futuro_icmp = executor.submit(varrer_rede_icmp, **icmp_args)
         futuro_arp = executor.submit(varrer_rede_arp, **arp_args)
-        hosts_icmp = futuro_icmp.result()
-        resultados_arp = futuro_arp.result()
+
+        try:
+            hosts_icmp = futuro_icmp.result()
+        except Exception as erro:
+            hosts_icmp = set()
+            falha_icmp = True
+            avisos.append(f"ICMP indisponível: {erro}")
+
+        try:
+            resultados_arp = futuro_arp.result()
+        except Exception as erro:
+            resultados_arp = {}
+            falha_arp = True
+            avisos.append(f"ARP indisponível: {erro}")
+
+    if falha_icmp and falha_arp:
+        raise RuntimeError("Não foi possível concluir a varredura. " + " | ".join(avisos))
 
     faixa = None
     if rede_varrida is not None:
@@ -119,23 +151,36 @@ def descobrir_dispositivos(
             },
             key=IPv4Address,
         )
-        verificadas = _escanear_portas(
-            ips, intervalo_portas, tempo_limite_porta, portas_excluidas, concorrencia_portas,
-        )
+        verificadas = _escanear_portas(ips, intervalo_portas, tempo_limite_porta, portas_excluidas, concorrencia_portas)
         portas_por_ip = {ip: portas for ip, portas in verificadas.items() if portas is not None}
 
-    anterior = carregar_inventario()
+    try:
+        anterior = carregar_inventario()
+    except (OSError, TypeError, ValueError) as erro:
+        anterior = {}
+        avisos.append(f"Inventário não pôde ser lido: {erro}")
+
     historico = anterior if faixa is None else {ip: dados for ip, dados in anterior.items() if ip in faixa}
-    inventario = atualizar_inventario(historico, resultados_arp, hosts_icmp, portas_por_ip)
+    inventario = atualizar_inventario(
+        historico,
+        resultados_arp,
+        hosts_icmp,
+        portas_por_ip,
+        marcar_offline=not (falha_icmp or falha_arp),
+    )
 
     if salvar:
-        salvar_inventario(inventario if faixa is None else {**anterior, **inventario})
+        try:
+            salvar_inventario(inventario if faixa is None else {**anterior, **inventario})
+        except (OSError, TypeError, ValueError) as erro:
+            avisos.append(f"Inventário não pôde ser salvo: {erro}")
 
     return ResultadoDescoberta(
         dados_rede=dados_rede,
         dispositivos=[Device.from_dict(ip, dados) for ip, dados in inventario.items()],
         rede_varrida=rede_varrida,
         portas_verificadas=verificadas,
+        avisos=tuple(avisos),
     )
 
 
@@ -147,10 +192,7 @@ def _rede_local(dados: DadosRede, rede: str | None) -> IPv4Network:
     return alvo
 
 
-def _escanear_portas(
-    ips: Iterable[str], intervalo: tuple[int, int], timeout: float,
-    excluidas: tuple[int, ...], concorrencia: int | None,
-) -> dict[str, list[int] | None]:
+def _escanear_portas(ips: Iterable[str], intervalo: tuple[int, int], timeout: float, excluidas: tuple[int, ...], concorrencia: int | None) -> dict[str, list[int] | None]:
     inicio, fim = intervalo
     argumentos = {"timeout": timeout}
     if excluidas:
