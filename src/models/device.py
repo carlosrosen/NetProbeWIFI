@@ -6,6 +6,7 @@ import json
 from datetime import datetime
 from ipaddress import IPv4Address
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Iterable, Mapping
 
 
@@ -120,15 +121,12 @@ def salvar_inventario(inventario: Mapping[str, Any], caminho: str | Path = CAMIN
     """Salva o inventario em JSON de forma legivel."""
     caminho_arquivo = Path(caminho)
     caminho_arquivo.parent.mkdir(parents=True, exist_ok=True)
-    with caminho_arquivo.open("w", encoding="utf-8") as arquivo:
-        json.dump(
-            dict(inventario),
-            arquivo,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        )
-        arquivo.write("\n")
+    with TemporaryDirectory(dir=caminho_arquivo.parent) as pasta:
+        temporario = Path(pasta) / caminho_arquivo.name
+        with temporario.open("w", encoding="utf-8") as arquivo:
+            json.dump(dict(inventario), arquivo, ensure_ascii=False, indent=2, sort_keys=True)
+            arquivo.write("\n")
+        temporario.replace(caminho_arquivo)
 
 
 def atualizar_inventario(
