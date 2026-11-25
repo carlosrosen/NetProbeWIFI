@@ -4,8 +4,8 @@ Documentação detalhada do módulo [`src/scanner/arp.py`](../src/scanner/arp.py
 
 Este módulo implementa a descoberta de dispositivos IPv4 na rede local usando
 ARP e a detecção de conflitos de IP. Ele é independente do scanner ICMP e da
-interface gráfica: não importa `icmp.py`, não imprime nada (fora do bloco de
-teste manual) e retorna dados simples em Python.
+interface gráfica: não importa `icmp.py`, não imprime nada e retorna dados
+simples em Python.
 
 ---
 
@@ -69,7 +69,6 @@ O `arp.py` está dividido nas seguintes seções:
 6. **Análise das respostas** — `_agrupar_respostas_por_ip`,
    `_converter_para_resultado_ordenado`, `_normalizar_macs` e
    `_normalizar_ip_ativo`.
-7. **Teste manual** — bloco `if __name__ == "__main__"`.
 
 Essa divisão mantém a API pública no topo e os detalhes de implementação
 abaixo, facilitando a leitura e a manutenção.
@@ -151,15 +150,23 @@ DadosRede(
 
 **Como funciona:**
 
-1. Resolve a interface; se `interface` for `None`, usa
-   `conf.route.route("0.0.0.0")[0]`.
-3. Ela tenta obter o nome amigável da interface com
-   `resolve_iface(interface).name`, porque o `psutil` e o Scapy podem usar
-   nomes diferentes no Windows.
-4. Percorre `psutil.net_if_addrs()` e procura um endereço IPv4 com máscara.
-5. Monta a rede com `IPv4Network(f"{ip}/{mascara}", strict=False)`.
-6. Se o `psutil` não estiver disponível ou não achar a máscara, usa
-   `get_if_addr(interface)` e assume `/24` como último recurso.
+1. Resolve a interface. Se `interface` for `None`, usa a rota padrão
+   (`conf.route.route("0.0.0.0")`); se a rota não puder ser determinada, gera
+   `RuntimeError` com uma mensagem clara.
+2. Tenta obter o nome amigável da interface com `resolve_iface(interface).name`,
+   porque o `psutil` e o Scapy podem usar nomes diferentes no Windows.
+3. Percorre `psutil.net_if_addrs()` e valida cada IPv4 com
+   `_validar_ip_local`. Endereços loopback, link-local, `0.0.0.0` e inválidos
+   são ignorados.
+4. Monta a rede com `IPv4Network(f"{ip}/{mascara}", strict=False)`.
+5. Quando há mais de um IPv4 válido, prefere o endereço que o Scapy usa na
+   interface (`get_if_addr`), evitando escolher um adaptador secundário/VPN.
+6. Se o `psutil` não estiver disponível, não tiver endereço válido ou não
+   achar a máscara, usa `get_if_addr(interface)` e assume `/24` como último
+   recurso. Se esse endereço também for inadequado, gera `RuntimeError`.
+
+**Exceções:** `RuntimeError` se a rota padrão não puder ser determinada, se a
+interface não puder ser consultada ou se não houver IPv4 local válido.
 
 **Por que não usar `conf.iface`:**
 
@@ -186,29 +193,35 @@ sair pela interface errada.
 | `alvos`        | `Iterable[str] \| str \| None` | `None` | IPs específicos. Se omitido, usa `rede`. Uma string única é aceita.              |
 | `rede`         | `str \| None`                  | `None` | Rede em CIDR, por exemplo `"192.168.0.0/24"`. Ignorada se `alvos` for fornecido. |
 | `interface`    | `str \| None`                  | `None` | Interface de rede. Se omitida, usa a interface da rota padrão.                   |
-| `tempo_limite` | `float`                        | `1.0`  | Segundos de espera por resposta. Deve ser maior que zero.                        |
-| `tentativas`   | `int`                          | `2`    | Quantas vezes reenviar requisições sem resposta.                                 |
-| `intervalo`    | `float`                        | `0.0`  | Intervalo entre pacotes, em segundos.                                            |
+| `tempo_limite` | `float`                        | `1.0`  | Segundos de espera por resposta. Finito, maior que zero e no máximo `60`.       |
+| `tentativas`   | `int`                          | `2`    | Quantas vezes reenviar requisições sem resposta. Inteiro maior ou igual a zero.  |
+| `intervalo`    | `float`                        | `0.0`  | Intervalo entre pacotes, em segundos. Finito, entre `0` e `60`.                  |
 
 **Dica de confiabilidade:** em redes Wi-Fi ou com muitos dispositivos, use
 `tempo_limite=2.0`, `tentativas=2` e `intervalo=0.01`. Com os valores padrão,
 algumas respostas podem ser perdidas.
 
+**Limite de alvos:** a varredura aceita no máximo **65.536 endereços**. Redes
+maiores ou listas de alvos acima desse limite geram `ValueError` antes do envio
+dos pacotes.
+
 **Retorno:** `{ip: [macs]}`. IPs sem resposta ARP não entram no dicionário.
 
 **Exceções:**
 
-- `ValueError`: parâmetro inválido, IP malformado ou rede malformada.
-- `RuntimeError`: interface sem IPv4 válido, falta de permissão ou falta do
-  Npcap no Windows.
+- `ValueError`: parâmetro com tipo ou valor inválido, `NaN`/`inf`, IP malformado,
+  rede malformada ou rede/lista acima do limite de alvos.
+- `RuntimeError`: interface sem IPv4 válido, falta de permissão, falha de camada
+  2 ou Npcap indisponível no Windows.
 
 **Como funciona:**
 
-1. Valida `tempo_limite`, `tentativas` e `intervalo`.
+1. Valida `tempo_limite`, `tentativas` e `intervalo` (tipo, finitude e faixa).
 2. Chama `_resolver_ips_alvo` para obter a lista de IPs e a interface.
 3. Se a lista estiver vazia, retorna `{}`.
-4. Chama `_enviar_requisicoes_arp` para enviar os pacotes e interpretar respostas.
-5. Ordena os IPs numericamente e os MACs alfabeticamente.
+4. Verifica o limite de 65.536 alvos.
+5. Chama `_enviar_requisicoes_arp` para enviar os pacotes e interpretar respostas.
+6. Ordena os IPs numericamente e os MACs alfabeticamente.
 
 **Exemplo:**
 
@@ -362,13 +375,22 @@ Esses helpers agora ficam em
 **Como funciona:**
 
 ```python
-if interface:
+if not interface:
+    rota = conf.route.route("0.0.0.0")
+    if not rota or not rota[0]:
+        raise RuntimeError("Não foi possível determinar a interface da rota padrão.")
+    interface = rota[0]
+
+try:
+    return resolve_iface(interface).name or interface
+except Exception:
     return interface
-return conf.route.route("0.0.0.0")[0]
 ```
 
-Se o usuário passou uma interface, usa ela. Caso contrário, usa a interface da
-rota padrão. Não usa `conf.iface` para evitar o problema da VPN descrito em
+Se o usuário passou uma interface, tenta convertê-la para o nome amigável
+usado pelo Scapy. Se a interface não puder ser resolvida, devolve o nome
+original; a validação posterior de IP gera `RuntimeError` com uma mensagem
+clara. Não usa `conf.iface` para evitar o problema da VPN descrito em
 `obter_dados_rede`.
 
 #### `_obter_dados_do_sistema(interface) -> DadosRede | None`
@@ -377,12 +399,15 @@ rota padrão. Não usa `conf.iface` para evitar o problema da VPN descrito em
 
 **Como funciona:**
 
-1. Se o `psutil` não estiver disponível, retorna `None`.
+1. Se o `psutil` não estiver disponível ou falhar, retorna `None`.
 2. Percorre os nomes candidatos da interface.
-3. Para cada endereço IPv4 com máscara, monta `IPv4Network(ip/máscara)` e
-   retorna um `DadosRede` com interface, IP, máscara e CIDR.
-4. Se não achar nada, retorna `None` para o `obter_dados_rede` usar a
-   alternativa `/24`.
+3. Para cada endereço IPv4 com máscara, valida o IP com `_validar_ip_local`;
+   loopback, link-local, `0.0.0.0` e endereços inválidos são ignorados.
+4. Monta `IPv4Network(ip/máscara)` e guarda um `DadosRede` candidato.
+5. Se houver mais de um IPv4 válido, prefere o que coincide com o endereço
+   retornado por `get_if_addr(interface)`.
+6. Se não achar nenhum candidato válido, retorna `None` para o
+   `obter_dados_rede` usar a alternativa `/24`.
 
 #### `_candidatos_de_nome_da_interface(interface) -> list[str]`
 
@@ -404,11 +429,13 @@ interface.
 
 **Como funciona:**
 
-1. Se `alvos` foi fornecido, normaliza os IPs com `_normalizar_ips_alvo`.
+1. Se `alvos` foi fornecido, normaliza os IPs com `_normalizar_ips_alvo` e
+   resolve a interface. A rede não é usada nesse caso.
 2. Se `alvos` não foi fornecido:
    - se `rede` também não foi, chama `obter_dados_rede`;
    - caso contrário, resolve a interface.
-3. Chama `_ips_utilizaveis_da_rede(rede)` para gerar os IPs utilizáveis.
+3. Chama `_ips_utilizaveis_da_rede(rede)` para gerar os IPs utilizáveis; a
+   função aplica o limite de 65.536 endereços.
 
 #### `_normalizar_ips_alvo(alvos) -> list[str]`
 
@@ -426,6 +453,10 @@ caractere (`"1"`, `"9"`, `"2"` etc.) e tenta validar cada um como IP.
 
 **Objetivo:** gerar todos os IPs utilizáveis de uma rede IPv4.
 
+Antes de materializar a lista, verifica `num_addresses` contra
+`MAXIMO_HOSTS_PADRAO` (`65.536`). Redes maiores geram `ValueError` para evitar
+consumo excessivo de memória e o envio de milhões de pacotes.
+
 Usa `IPv4Network(rede, strict=False).hosts()`, que exclui endereço de rede e
 broadcast.
 
@@ -436,9 +467,15 @@ broadcast.
 
 **Objetivo:** validar os parâmetros de tempo e tentativas.
 
-- `tempo_limite <= 0` → `ValueError`.
-- `tentativas < 0` → `ValueError`.
-- `intervalo < 0` → `ValueError`.
+- `tempo_limite` deve ser um número finito, maior que zero e no máximo `60`.
+  Caso contrário, gera `ValueError`.
+- `tentativas` deve ser um inteiro maior ou igual a zero. `bool`, `float` e
+  strings geram `ValueError`.
+- `intervalo` deve ser um número finito entre `0` e `60`. `NaN`, `inf` e tipos
+  inválidos geram `ValueError`.
+
+Essas validações evitam que valores como `inf` cheguem ao `srp` e travem a
+thread de envio do Scapy.
 
 ---
 
@@ -499,12 +536,18 @@ pacotes_respondidos, _pacotes_sem_resposta = srp(
 | `multi=True`      | Continua esperando respostas adicionais para o mesmo pacote. Essencial para detectar conflito. |
 | `verbose=False`   | Desliga os logs do Scapy.                                                                      |
 
-3. Trata erros:
+3. Trata erros e converte em `RuntimeError` com mensagem orientativa:
    - `PermissionError`: o Npcap/driver negou o acesso; normalmente ocorre em
      instalação “admin-only” ou quando falta permissão.
-   - `RuntimeError` com “winpcap” ou “layer 2”: Npcap não instalado ou camada 2
-     indisponível.
+   - `Scapy_Exception` e outros `OSError`: falha ao abrir/usar a camada 2,
+     Npcap ausente ou camada 2 indisponível.
+   - `RuntimeError` com “winpcap” ou “layer 2”: mantém a mensagem específica
+     de Npcap/camada 2.
 4. Chama `_agrupar_respostas_por_ip`.
+
+Quando a varredura é executada por `descobrir_dispositivos`, uma falha do ARP
+não descarta o resultado do ICMP: a descoberta retorna os dispositivos
+encontrados pelo ICMP e um aviso em `ResultadoDescoberta.avisos`.
 
 **Por que `multi=True` é essencial:**
 
@@ -573,42 +616,36 @@ Remove duplicatas, converte para minúsculo e ordena. É usada por
 
 ---
 
-### 3.13 `__main__`
-
-O bloco final permite testar o módulo manualmente:
-
-```powershell
-.\.venv\Scripts\python.exe -m src.scanner.arp
-```
-
-Ele chama `varrer_rede_arp()` e imprime IP, MACs e o marcador `<-- CONFLITO` quando
-um IP tem mais de um MAC.
-
----
-
 ## 4. Integração com o ICMP
 
-O contrato sugerido com o módulo ICMP é:
+O contrato com o módulo ICMP é:
 
 ```python
-from ipaddress import IPv4Network
-
 from src.scanner.arp import (
     encontrar_conflitos,
     filtrar_bloqueados_icmp,
     varrer_rede_arp,
 )
-from src.scanner.icmp import ping_sweep
+from src.scanner.icmp import varrer_rede_icmp
 
 rede = "192.168.0.0/24"
 interface = "Ethernet"
 
-alvos = [str(endereco_ip) for endereco_ip in IPv4Network(rede).hosts()]
+hosts_icmp = varrer_rede_icmp(
+    rede=rede,
+    interface=interface,
+    quantidade_pings=1,
+    tempo_limite=1.0,
+)
+resultados_arp = varrer_rede_arp(
+    rede=rede,
+    interface=interface,
+    tempo_limite=2.0,
+    tentativas=2,
+    intervalo=0.01,
+)
 
-ips_ativos_icmp = ping_sweep(alvos, timeout=1.0)
-resultados_arp = varrer_rede_arp(alvos, interface=interface)
-
-bloqueados = filtrar_bloqueados_icmp(resultados_arp, ips_ativos_icmp)
+bloqueados = filtrar_bloqueados_icmp(resultados_arp, hosts_icmp)
 conflitos = encontrar_conflitos(resultados_arp)
 
 for endereco_ip, enderecos_mac in resultados_arp.items():
@@ -622,33 +659,38 @@ for endereco_ip, enderecos_mac in resultados_arp.items():
     print(endereco_ip, enderecos_mac, status)
 ```
 
-Se a função da outra pessoa tiver outro nome ou outro retorno, só adapta essa
-parte; o `arp.py` não precisa mudar.
+O `varrer_rede_icmp` retorna `Set[Host]`; o `filtrar_bloqueados_icmp` extrai
+`host.address` automaticamente. Para uma descoberta completa, prefira
+`descobrir_dispositivos`, que executa ICMP e ARP em paralelo, isola falhas de
+cada scanner e devolve avisos sem descartar o resultado do outro.
 
 ---
 
-## 5. Testes
+## 5. Validação manual
 
-Os testes unitários estão em [`tests/test_arp.py`](../tests/test_arp.py) e não
-acessam a rede: o `srp` do Scapy é substituído por um fake. Atualmente são
-**8 testes**.
+A validação pode ser feita pelo menu principal:
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_arp.py -v
+1. Execute o menu principal:
+   ```powershell
+   .\.venv\Scripts\python.exe -m src.interface.terminal
+   ```
+2. Selecione uma interface/rede pequena, como `192.168.0.0/30`, e execute a
+   varredura.
+3. Confira a coluna “Via” (ARP/ICMP), os conflitos e os avisos exibidos.
+
+Também é possível testar diretamente em Python:
+
+```python
+from src.scanner.arp import varrer_rede_arp
+
+resultado = varrer_rede_arp(
+    alvos=["192.168.0.1"],
+    interface="Ethernet",
+    tempo_limite=1.0,
+    tentativas=1,
+)
+print(resultado)
 ```
-
-Cobertura atual:
-
-- agrupamento de dois MACs no mesmo IP;
-- ignorar pacotes que não são resposta ARP;
-- geração de alvos a partir de uma rede `/30`;
-- cruzamento com ICMP;
-- detecção de conflito de IP;
-- detecção de MAC duplicado em IPs diferentes;
-- caminho completo do `varrer_rede_arp` com `srp` mockado;
-- rejeição de `tempo_limite` inválido.
-
-O bloco `__main__` não é coberto pelo `pytest`; ele serve para teste manual.
 
 ---
 
@@ -657,8 +699,10 @@ O bloco `__main__` não é coberto pelo `pytest`; ele serve para teste manual.
 1. **Npcap no Windows.** ARP é camada 2; sem Npcap não funciona. A instalação
    do Npcap pode ser restrita a administradores (opção “Restrict Npcap driver's
    access to Administrators only”); nesse caso, também é preciso rodar como
-   admin. Em instalações sem essa restrição, um usuário comum pode conseguir
-   usar. O código detecta a falha e mostra uma mensagem clara.
+   admin. Em instalações sem essa restrição, um usuário comum pode usar.
+   `PermissionError`, `Scapy_Exception` e `OSError` são convertidos em
+   `RuntimeError` com mensagem orientativa. Quando a varredura é feita pelo
+   `descobrir_dispositivos`, o ICMP continua e o aviso é exibido.
 2. **ARP só funciona na mesma rede local (L2).** Não atravessa roteador, VPN
    ou outra sub-rede.
 3. **Isolamento de clientes no Wi-Fi** pode bloquear ARP entre dispositivos.
@@ -672,6 +716,10 @@ O bloco `__main__` não é coberto pelo `pytest`; ele serve para teste manual.
 6. **`obter_dados_rede` vive em `src/network/interfaces.py`.** Use
    `interface`/`rede` explicitamente quando a máquina tiver mais de um
    adaptador.
-7. **Não altere o `device.py` sozinho.** O retorno é um dicionário; a camada
+7. **Rede limitada a 65.536 alvos.** Redes maiores são rejeitadas antes do
+   envio para evitar consumo excessivo de memória e tráfego.
+8. **Tempo e intervalo limitados a 60 s.** Valores `NaN`, `inf`, negativos ou
+   acima do limite são rejeitados; isso evita travamentos no Scapy.
+9. **Não altere o `device.py` sozinho.** O retorno é um dicionário; a camada
    de integração/UI decide como transformar em `Device` e como mostrar o
    status “ICMP bloqueado” ou “conflito”.
