@@ -46,7 +46,7 @@ class TestDescoberta(unittest.TestCase):
             patch(
                 "src.network.discovery.varrer_rede_icmp",
                 return_value=[host("192.168.0.73")],
-            ),
+            ) as icmp,
             patch(
                 "src.network.discovery.varrer_rede_arp",
                 return_value={"192.168.0.1": ["84:01:12:bd:16:2f"]},
@@ -90,6 +90,13 @@ class TestDescoberta(unittest.TestCase):
 
         self.assertEqual(len(resultado.online), 2)
         self.assertEqual(len(resultado.offline), 1)
+        icmp.assert_called_once_with(
+            rede=DADOS_REDE.rede,
+            interface=DADOS_REDE.interface,
+            tempo_limite=2.0,
+            quantidade_pings=2,
+            tarefas_concorrentes=50,
+        )
         arp.assert_called_once_with(
             rede=DADOS_REDE.rede,
             interface=DADOS_REDE.interface,
@@ -98,7 +105,7 @@ class TestDescoberta(unittest.TestCase):
             intervalo=0.01,
         )
         self.assertEqual(scan.call_count, 2)
-        scan.assert_any_call("192.168.0.1", 1, 100, timeout=0.3)
+        scan.assert_any_call("192.168.0.1", 1, 100, timeout=0.5)
         salvar.assert_called_once()
 
     def test_sem_portas_nao_executa_varredura_de_portas(self):
@@ -200,7 +207,7 @@ class TestDescoberta(unittest.TestCase):
             "192.168.0.1",
             1,
             100,
-            timeout=0.3,
+            timeout=0.5,
         )
 
     def test_quantidade_de_portas_personalizada(self):
@@ -235,7 +242,7 @@ class TestDescoberta(unittest.TestCase):
             "192.168.0.1",
             1,
             50,
-            timeout=0.3,
+            timeout=0.5,
         )
 
     def test_quantidade_de_portas_invalida(self):

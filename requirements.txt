@@ -2,3 +2,4 @@ scapy
 rich
 psutil
 icmplib
+pytest
