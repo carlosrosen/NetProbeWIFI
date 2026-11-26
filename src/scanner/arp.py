@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from ipaddress import IPv4Address, IPv4Network
 from typing import Iterable, Mapping, Sequence
@@ -13,9 +14,11 @@ from scapy.all import (
     get_if_hwaddr,
     srp,
 )
+from scapy.error import Scapy_Exception
 from scapy.packet import Packet
 
 from src.network.interfaces import (NomeInterface, _resolver_interface, obter_dados_rede)
+from src.network.limits import MAXIMO_HOSTS_PADRAO, MAXIMO_SEGUNDOS
 
 __all__ = [
     "ResultadoArp",
@@ -56,6 +59,9 @@ def varrer_rede_arp(
 
     if not ips_alvo:
         return {}
+
+    if len(ips_alvo) > MAXIMO_HOSTS_PADRAO:
+        raise ValueError(f"A varredura ARP tem {len(ips_alvo)} alvos, acima do limite de {MAXIMO_HOSTS_PADRAO}. Use uma rede menor.")
 
     respostas_por_ip = _enviar_requisicoes_arp(ips_alvo, interface=interface, tempo_limite=tempo_limite, tentativas=tentativas,intervalo=intervalo)
 
@@ -123,20 +129,38 @@ def _normalizar_ips_alvo(alvos: Iterable[EnderecoIp] | EnderecoIp) -> list[Ender
     return [str(IPv4Address(endereco_ip)) for endereco_ip in alvos]
 
 def _ips_utilizaveis_da_rede(rede: str) -> list[EnderecoIp]:
-    """Gera todos os IPs utilizáveis de uma rede IPv4."""
+    """Gera todos os IPs utilizáveis de uma rede IPv4, com limite de segurança."""
 
     rede_ipv4 = IPv4Network(rede, strict=False)
+
+    if rede_ipv4.num_addresses > MAXIMO_HOSTS_PADRAO:
+        raise ValueError(f"A rede '{rede_ipv4}' possui {rede_ipv4.num_addresses} endereços, acima do limite de {MAXIMO_HOSTS_PADRAO}. Use uma rede menor.")
+
     return [str(endereco_ip) for endereco_ip in rede_ipv4.hosts()]
 
 def _validar_parametros_da_varredura(tempo_limite: float,tentativas: int,intervalo: float) -> None:
     """Valida os parâmetros de tempo e tentativas da varredura."""
 
-    if tempo_limite <= 0:
-        raise ValueError("tempo_limite deve ser maior que zero.")
-    if tentativas < 0:
-        raise ValueError("tentativas não pode ser negativo.")
-    if intervalo < 0:
-        raise ValueError("intervalo não pode ser negativo.")
+    if (
+        not isinstance(tempo_limite, (int, float))
+        or isinstance(tempo_limite, bool)
+        or not math.isfinite(tempo_limite)
+        or not 0 < tempo_limite <= MAXIMO_SEGUNDOS
+    ):
+        raise ValueError(f"tempo_limite deve ser um número finito entre 0 e {MAXIMO_SEGUNDOS:g}.")
+    if (
+        not isinstance(tentativas, int)
+        or isinstance(tentativas, bool)
+        or tentativas < 0
+    ):
+        raise ValueError("tentativas deve ser um inteiro maior ou igual a zero.")
+    if (
+        not isinstance(intervalo, (int, float))
+        or isinstance(intervalo, bool)
+        or not math.isfinite(intervalo)
+        or not 0 <= intervalo <= MAXIMO_SEGUNDOS
+    ):
+        raise ValueError(f"intervalo deve ser um número finito entre 0 e {MAXIMO_SEGUNDOS:g}.")
 
 # Construção e envio dos pacotes ARP
 
@@ -188,6 +212,9 @@ def _enviar_requisicoes_arp(
         raise RuntimeError(
             "ARP precisa de privilégios de administrador/root. No Windows, instale o Npcap e execute o terminal como administrador. E no Linux/macOS, execute com sudo."
         ) from exc
+
+    except (Scapy_Exception, OSError) as exc:
+        raise RuntimeError("Falha ao abrir ou usar a camada 2. No Windows, instale o Npcap e execute o terminal como administrador. No Linux/macOS, use sudo ou CAP_NET_RAW.") from exc
 
     except RuntimeError as exc:
         mensagem_erro = str(exc).lower()
@@ -243,29 +270,7 @@ def _normalizar_ip_ativo(item: object) -> EnderecoIp:
         if isinstance(endereco, IPv4Address):
             endereco = str(endereco)
         elif not isinstance(endereco, str):
-            raise TypeError(
-                "Cada item de 'ips_ativos' deve ser uma string de IP, "
-                "IPv4Address ou um objeto com atributo 'address'."
-            )
+            raise TypeError("Cada item de 'ips_ativos' deve ser uma string de IP, IPv4Address ou um objeto com atributo 'address'.")
         endereco = endereco.strip()
     return str(IPv4Address(endereco))
 
-# ---------------------------------------------------------------------------
-# Teste manual
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    # Rode `python -m src.scanner.arp` como administrador/root.
-    resultados_arp = varrer_rede_arp()
-
-    if not resultados_arp:
-        print("Nenhum dispositivo respondeu ao ARP.")
-    else:
-        for endereco_ip, enderecos_mac in resultados_arp.items():
-            marcador_conflito = (
-                "  <-- CONFLITO" if len(enderecos_mac) > 1 else ""
-            )
-            print(
-                f"{endereco_ip:15} {' / '.join(enderecos_mac)}"
-                f"{marcador_conflito}"
-            )

@@ -109,18 +109,24 @@ class DadosRede:
 
 **Como funciona:**
 
-1. Resolve a interface; se `interface` for `None`, usa a rota padrão.
-2. Consulta o `psutil` para obter IP e máscara.
+1. Resolve a interface; se `interface` for `None`, usa a rota padrão. Se a rota
+   não puder ser determinada, gera `RuntimeError`.
+2. Consulta o `psutil` e valida cada IPv4 com `_validar_ip_local`. Loopback,
+   link-local, `0.0.0.0` e endereços inválidos são ignorados.
 3. Monta a rede com `IPv4Network(ip/máscara, strict=False)`.
-4. Se o `psutil` não estiver disponível, usa o IP da interface e assume `/24`.
-5. Valida o IP com `_validar_ip_local`.
+4. Se houver mais de um IPv4 válido, prefere o endereço que o Scapy usa na
+   interface (`get_if_addr`), evitando escolher um adaptador secundário/VPN.
+5. Se o `psutil` não estiver disponível ou não houver endereço válido, usa
+   `get_if_addr(interface)` e assume `/24` como último recurso. Se o endereço
+   também for inadequado, gera `RuntimeError`.
 
 **Retorno:** `DadosRede`.
 
-**Exceção:** `RuntimeError` se não houver IP local válido.
+**Exceção:** `RuntimeError` se não houver IP local válido ou se a interface não
+puder ser consultada.
 
-**Observação:** agora o ICMP pode usar a mesma interface do ARP, evitando que
-cada módulo escolha uma rede diferente.
+**Observação:** o ICMP usa a mesma interface do ARP, evitando que cada módulo
+escolha uma rede diferente.
 
 ---
 
@@ -147,11 +153,11 @@ def varrer_rede_icmp(
 |---|---|---|---|
 | `rede` | `str \| IPv4Network \| None` | `None` | Rede alvo em CIDR, IP base ou objeto `IPv4Network`. Se `None`, usa a rede real da interface. |
 | `cidr` | `int` | `24` | Prefixo usado quando `rede` é uma string sem `/`. Quando `rede` é `None`, a máscara real da interface é usada. |
-| `tempo_limite` | `float` | `2.0` | Tempo máximo de espera por resposta de cada pacote. |
-| `quantidade_pings` | `int` | `2` | Número de pacotes ICMP enviados por host. |
-| `intervalo` | `float` | `0.05` | Intervalo entre pacotes, em segundos. |
-| `tarefas_concorrentes` | `int` | `50` | Número máximo de pings simultâneos. |
-| `privilegiado` | `bool` | `False` | Usa socket privilegiado. No Windows é ignorado; no Linux pode exigir root ou `ping_group_range`. |
+| `tempo_limite` | `float` | `2.0` | Tempo máximo de espera por resposta. Finito e maior que zero. |
+| `quantidade_pings` | `int` | `2` | Número de pacotes ICMP enviados por host. Inteiro maior que zero. |
+| `intervalo` | `float` | `0.05` | Intervalo entre pacotes, em segundos. Finito e maior ou igual a zero. |
+| `tarefas_concorrentes` | `int` | `50` | Número máximo de pings simultâneos. Inteiro maior que zero. |
+| `privilegiado` | `bool` | `False` | Usa socket privilegiado. No Windows o `icmplib` força o modo privilegiado; no Linux/macOS pode exigir root ou `ping_group_range`. Também disponível no menu e em `descobrir_dispositivos(privilegiado=True)`. |
 | `interface` | `str \| None` | `None` | Interface usada para descobrir a rede e definir o IP de origem. Se `None`, usa a rota padrão. |
 
 **Retorno:** `Set[Host]` com apenas os hosts que responderam.
@@ -167,20 +173,21 @@ def varrer_rede_icmp(
 **Como funciona:**
 
 1. Valida `cidr`, `tempo_limite`, `quantidade_pings`, `intervalo`,
-   `tarefas_concorrentes` e `privilegiado`.
+   `tarefas_concorrentes` e `privilegiado`, incluindo tipos e valores
+   `NaN`/`inf`.
 2. Chama `obter_dados_rede(interface)`.
 3. Se `rede` for `None`, usa `dados.rede` (a máscara real da interface
    prevalece sobre `cidr`).
 4. Usa `dados.ip_local` como IP de origem.
-4. Resolve a rede:
+5. Resolve a rede:
    - `IPv4Network` → usa o objeto;
    - `str` → aceita CIDR ou IP base; se não tiver `/`, acrescenta `cidr`.
-5. Verifica `MAXIMO_HOSTS_PADRAO` (65.536 endereços) para evitar redes
+6. Verifica `MAXIMO_HOSTS_PADRAO` (65.536 endereços) para evitar redes
    gigantes como `/0` ou `/8`.
-6. Gera a lista com `objeto_rede.hosts()`, que exclui rede e broadcast.
-7. Chama `multiping` com `source=ip_origem`, forçando a saída pela interface
+7. Gera a lista com `objeto_rede.hosts()`, que exclui rede e broadcast.
+8. Chama `multiping` com `source=ip_origem`, forçando a saída pela interface
    escolhida.
-8. Mantém apenas os hosts com `host.is_alive`.
+9. Mantém apenas os hosts com `host.is_alive`.
 
 **Exemplo simples:**
 
@@ -266,18 +273,28 @@ for ip, macs in bloqueados.items():
 O ARP extrai `host.address` internamente. Não é necessário converter para
 `set[str]` antes da chamada.
 
+Para uma descoberta completa, prefira `descobrir_dispositivos`: ele executa
+ICMP e ARP em paralelo, isola falhas de cada scanner e devolve
+`ResultadoDescoberta.avisos`. Quando apenas um scanner falha, o resultado do
+outro é preservado e os dispositivos não encontrados passam para `unknown`, em
+vez de serem marcados como `offline`.
+
 ---
 
 ## 4. Permissões por sistema
 
 | Sistema | Comportamento |
 |---|---|
-| Windows | `privilegiado` é ignorado. O teste real funcionou sem admin. |
+| Windows | O `icmplib` força o modo privilegiado. Na máquina de teste funcionou sem admin; se o socket for negado, o `descobrir_dispositivos` preserva o resultado do ARP e exibe um aviso. |
 | Linux | `privilegiado=False` pode exigir `net.ipv4.ping_group_range`; `privilegiado=True` normalmente exige root/sudo. |
 | macOS | Pode exigir permissões de socket; use `sudo` se necessário. |
 
-No Linux, se ocorrer `PermissionError`, a mensagem orienta a executar como
-root com `privilegiado=True` ou configurar `net.ipv4.ping_group_range`.
+O menu principal permite ativar o ICMP privilegiado. O padrão é ativado
+automaticamente quando o processo roda como root (`geteuid() == 0`). No Linux,
+se ocorrer `PermissionError`, a mensagem orienta a executar como root com
+`privilegiado=True` ou configurar `net.ipv4.ping_group_range`. Em uma descoberta
+completa, uma falha de ICMP não derruba o ARP: o resultado parcial é exibido
+com aviso.
 
 ---
 
@@ -285,7 +302,7 @@ root com `privilegiado=True` ou configurar `net.ipv4.ping_group_range`.
 
 1. **Hosts que bloqueiam ICMP não aparecem.** Use o ARP para encontrá-los.
 2. **O IP local pode aparecer no resultado**, porque ele responde ao próprio
-   ping. Decida na UI se ele deve ser exibido.
+   ping. A interface atual o exibe como um dispositivo comum; isso é esperado.
 3. **A rota padrão pode apontar para VPN.** Quando `interface` não é informada,
    o IP descoberto pode ser o da VPN. Passe `interface="Ethernet"`/`"Wi-Fi"`
    para alinhar com o ARP.
@@ -293,24 +310,34 @@ root com `privilegiado=True` ou configurar `net.ipv4.ping_group_range`.
 5. **Não detecta portas.** A varredura de portas é feita pelo `ports.py`.
 6. **Não diferencia “offline” de “ICMP bloqueado”.** Isso é feito pelo
    cruzamento com o ARP.
-7. **Sem testes automatizados.** O `tests/test_icmp.py` é um script manual.
+7. **Falha de ICMP não derruba a descoberta completa.** Em
+   `descobrir_dispositivos`, o ARP continua e o resultado é retornado com um
+   aviso; dispositivos não encontrados ficam como `unknown`.
 
 ---
 
-## 6. Testes
+## 6. Validação manual
 
-O script manual está em [`tests/test_icmp.py`](../tests/test_icmp.py):
+A validação pode ser feita pelo menu principal:
 
 ```powershell
-.\.venv\Scripts\python.exe tests\test_icmp.py
+.\.venv\Scripts\python.exe -m src.interface.terminal
 ```
 
-Ele imprime os hosts encontrados e grava estatísticas em
-`hosts_ativos_encontrados.txt`.
+Use uma faixa pequena, como `192.168.0.0/30`, e confira os hosts encontrados,
+o status “ICMP bloqueado” e a coluna “Via”. Para testar diretamente:
 
-O `pytest` atual não coleta testes desse arquivo, porque ele usa
-`if __name__ == "__main__"`. Para cobertura automatizada, seria necessário
-criar funções `test_*` e mockar o `multiping`.
+```python
+from src.scanner.icmp import varrer_rede_icmp
+
+hosts = varrer_rede_icmp(
+    rede="192.168.0.0/30",
+    interface="Ethernet",
+    quantidade_pings=1,
+    tempo_limite=1.0,
+)
+print([host.address for host in hosts])
+```
 
 ---
 

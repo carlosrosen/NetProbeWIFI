@@ -14,6 +14,10 @@ CAMINHO_INVENTARIO = Path(__file__).resolve().parents[2] / "dados" / "inventario
 STATUS_VALIDOS = {"online", "offline", "unknown"}
 
 
+class InventarioCorrompidoError(ValueError):
+    """Indica que o arquivo de inventario existe, mas nao pode ser lido."""
+
+
 class Device:
     """Representa um dispositivo encontrado na rede."""
 
@@ -102,23 +106,88 @@ def consolidar_dispositivos(
     )
 
 
+def _validar_inventario(inventario: Mapping[str, Any]) -> None:
+    """Valida o formato do inventario antes de usa-lo ou grava-lo."""
+
+    if not isinstance(inventario, Mapping):
+        raise ValueError("O inventario JSON deve conter um objeto na raiz.")
+
+    for ip, dados in inventario.items():
+        if not isinstance(ip, str):
+            raise ValueError(f"A chave do inventario deve ser texto: {ip!r}.")
+
+        try:
+            IPv4Address(ip)
+        except ValueError as erro:
+            raise ValueError(f"Chave de IP invalida no inventario: {ip!r}.") from erro
+
+        if not isinstance(dados, dict):
+            raise ValueError(f"Os dados do dispositivo {ip} devem ser um objeto JSON.")
+
+        macs = dados.get("macs", [])
+        if not isinstance(macs, list) or not all(isinstance(mac, str) for mac in macs):
+            raise ValueError(f"A lista 'macs' do dispositivo {ip} e invalida.")
+
+        portas = dados.get("open_ports", [])
+        if not isinstance(portas, list) or not all(
+            isinstance(porta, int)
+            and not isinstance(porta, bool)
+            and 1 <= porta <= 65535
+            for porta in portas
+        ):
+            raise ValueError(f"A lista 'open_ports' do dispositivo {ip} e invalida.")
+
+        for campo in ("primeira_vez_visto", "ultima_vez_visto"):
+            valor = dados.get(campo)
+            if valor is not None and not isinstance(valor, str):
+                raise ValueError(f"O campo {campo!r} do dispositivo {ip} e invalido.")
+
+        Device.from_dict(ip, dados)
+
+
+def _mover_inventario_corrompido(caminho: Path) -> Path | None:
+    """Renomeia o arquivo invalido para nao perder o conteudo original."""
+
+    sufixo = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    destino = caminho.with_name(f"{caminho.name}.corrupt-{sufixo}")
+
+    try:
+        caminho.replace(destino)
+    except OSError:
+        return None
+
+    return destino
+
+
 def carregar_inventario(caminho: str | Path = CAMINHO_INVENTARIO) -> dict[str, Any]:
-    """Carrega o inventario JSON; retorna vazio se ele nao existir."""
+    """Carrega e valida o inventario JSON."""
     caminho_arquivo = Path(caminho)
 
     if not caminho_arquivo.exists():
         return {}
 
-    with caminho_arquivo.open("r", encoding="utf-8") as arquivo:
-        inventario = json.load(arquivo)
+    try:
+        with caminho_arquivo.open("r", encoding="utf-8") as arquivo:
+            inventario = json.load(arquivo)
+    except (json.JSONDecodeError, UnicodeDecodeError) as erro:
+        backup = _mover_inventario_corrompido(caminho_arquivo)
+        detalhe = f" Backup: {backup}." if backup else ""
+        raise InventarioCorrompidoError(f"O inventario JSON esta invalido: {erro}.{detalhe}") from erro
 
-    if not isinstance(inventario, dict):
-        raise ValueError("O inventario JSON deve conter um objeto na raiz.")
+    try:
+        _validar_inventario(inventario)
+    except (TypeError, ValueError) as erro:
+        backup = _mover_inventario_corrompido(caminho_arquivo)
+        detalhe = f" Backup: {backup}." if backup else ""
+        raise InventarioCorrompidoError(f"O inventario JSON possui dados invalidos: {erro}.{detalhe}") from erro
+
     return inventario
 
 
 def salvar_inventario(inventario: Mapping[str, Any], caminho: str | Path = CAMINHO_INVENTARIO) -> None:
     """Salva o inventario em JSON de forma legivel."""
+
+    _validar_inventario(inventario)
     caminho_arquivo = Path(caminho)
     caminho_arquivo.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=caminho_arquivo.parent) as pasta:
@@ -134,8 +203,15 @@ def atualizar_inventario(
     resultados_arp: Mapping[str, Iterable[str]],
     hosts_icmp: Iterable[object],
     portas_por_ip: Mapping[str, Iterable[int]] | None = None,
+    *,
+    marcar_offline: bool = True,
 ) -> dict[str, dict[str, Any]]:
-    """Atualiza o historico sem remover dispositivos vistos anteriormente."""
+    """Atualiza o historico sem remover dispositivos vistos anteriormente.
+
+    Quando ``marcar_offline`` e falso, dispositivos nao encontrados passam para
+    ``unknown`` em vez de ``offline``. Isso evita falsos negativos quando um dos
+    scanners (ICMP ou ARP) falhou.
+    """
     momento = _agora_iso()
 
     inventario_atualizado: dict[str, dict[str, Any]] = {
@@ -172,7 +248,7 @@ def atualizar_inventario(
 
     for ip, dados in inventario_atualizado.items():
         if ip not in ips_encontrados:
-            dados["status"] = "offline"
+            dados["status"] = "offline" if marcar_offline else "unknown"
             dados["arp_ativo"] = False
             dados["icmp_ativo"] = False
 
